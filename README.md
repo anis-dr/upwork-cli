@@ -143,13 +143,36 @@ bun run check
 
 The repository uses the published `oxlint-plugin-effect` package and a reviewed copy of `anti-slop` under `tools/oxlint/anti-slop/`.
 
-## Publish
+## Trunk workflow
 
-```bash
-bun publish
-```
+`main` is the only long-lived branch. Work in a short-lived branch, open a pull request, and merge only after the `Bun quality gate` check passes.
 
-`prepack` runs the full quality gate before Bun creates or publishes the npm artifact.
+Direct pushes, force pushes, and branch deletion are blocked on `main`.
+
+## Release
+
+The npm workflow publishes version tags that point to `main`. The tag must match the version in `package.json`.
+
+1. Create a short release branch and update the version:
+
+   ```bash
+   git switch -c release/v0.1.1
+   bun pm pkg set version=0.1.1
+   bun install --lockfile-only
+   bun run check
+   ```
+
+2. Commit the version change, push the branch, and merge its pull request.
+3. Tag the merged commit:
+
+   ```bash
+   git switch main
+   git pull --ff-only
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+The `Publish` workflow verifies the tag, reruns the quality gate, and calls `bun publish`. It reads the registry credential from the `NPM_TOKEN` secret in the `npm` GitHub environment.
 
 ## License
 
