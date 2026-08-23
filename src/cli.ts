@@ -3,7 +3,7 @@ import { BunRuntime, BunServices } from "@effect/platform-bun";
 import { Clock, Console, Effect, Layer, Option, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
-import { captureAuth, CliError } from "./auth.ts";
+import { captureAuth, CliError, loginAuth } from "./auth.ts";
 import {
   getJob,
   searchJobs,
@@ -29,13 +29,25 @@ const cdpFlag = Flag.integer("cdp").pipe(
   Flag.withDefault(9222),
   Flag.withDescription("Chrome DevTools Protocol port"),
 );
+const authTimeoutFlag = Flag.integer("timeout-minutes").pipe(
+  Flag.withDefault(10),
+  Flag.withDescription("Minutes to wait for the user to finish authentication"),
+);
+const loginCommand = Command.make(
+  "login",
+  {
+    cdp: cdpFlag,
+    timeoutMinutes: authTimeoutFlag,
+  },
+  ({ cdp, timeoutMinutes }) => loginAuth(cdp, timeoutMinutes).pipe(Effect.flatMap(printJson)),
+).pipe(Command.withDescription("Open Chrome and wait for Upwork authentication"));
 const captureCommand = Command.make("capture", { cdp: cdpFlag }, ({ cdp }) =>
   captureAuth(cdp).pipe(Effect.flatMap(printJson)),
 ).pipe(Command.withDescription("Capture authenticated Upwork state from Chrome"));
 
 const authCommand = Command.make("auth").pipe(
   Command.withDescription("Manage local Upwork authentication"),
-  Command.withSubcommands([captureCommand]),
+  Command.withSubcommands([loginCommand, captureCommand]),
 );
 
 const queryArgument = Argument.string("query").pipe(

@@ -1,4 +1,4 @@
-import { Config, Effect, FileSystem, Option, Path, Schema } from "effect";
+import { Config, Console, Effect, FileSystem, Option, Path, Schedule, Schema } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const BrowserCookie = Schema.Struct({
@@ -27,10 +27,42 @@ export interface AuthState {
   readonly path: string;
 }
 
+const userHome = Config.string("HOME").pipe(
+  Config.orElse(() => Config.string("USERPROFILE")),
+  Effect.mapError(
+    (cause) => new CliError({ message: "User home directory is not configured", cause }),
+  ),
+);
+
+export interface ChromeLaunchSpec {
+  readonly executable: string;
+  readonly args: ReadonlyArray<string>;
+}
+
+export const chromeLaunchSpecs = (
+  cdpPort: number,
+  profilePath: string,
+  url: string,
+): readonly [ChromeLaunchSpec, ...ReadonlyArray<ChromeLaunchSpec>] => {
+  const chromeArgs = [`--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profilePath}`, url];
+  return [
+    {
+      executable: "open",
+      args: ["-na", "Google Chrome", "--args", ...chromeArgs],
+    },
+    {
+      executable: "cmd.exe",
+      args: ["/d", "/s", "/c", "start", "", "chrome", ...chromeArgs],
+    },
+    { executable: "google-chrome", args: chromeArgs },
+    { executable: "google-chrome-stable", args: chromeArgs },
+    { executable: "chromium", args: chromeArgs },
+    { executable: "chromium-browser", args: chromeArgs },
+  ];
+};
+
 export const authStatePath = Effect.fn("Auth.statePath")(function* () {
-  const home = yield* Config.string("HOME").pipe(
-    Effect.mapError((cause) => new CliError({ message: "HOME is not configured", cause })),
-  );
+  const home = yield* userHome;
   return yield* Config.string("UPWORK_CLI_STATE").pipe(
     Config.withDefault(`${home}/.config/upwork-cli/state.json`),
   );
@@ -43,7 +75,7 @@ export const loadAuth = Effect.fn("Auth.load")(function* () {
     Effect.mapError(
       (cause) =>
         new CliError({
-          message: `No Upwork auth state at ${path}. Run: upwork auth capture --cdp 9222`,
+          message: `No Upwork auth state at ${path}. Run: upwork auth login`,
           cause,
         }),
     ),
@@ -122,4 +154,84 @@ export const captureAuth = Effect.fn("Auth.capture")(function* (cdpPort: number)
 
   const auth = yield* loadAuth();
   return { path: auth.path, cookies: auth.cookieCount };
+});
+
+const UPWORK_LOGIN_URL = "https://www.upwork.com/nx/find-work/";
+
+export const loginAuth = Effect.fn("Auth.login")(function* (
+  cdpPort: number,
+  timeoutMinutes: number,
+) {
+  if (timeoutMinutes < 1) {
+    return yield* new CliError({ message: "Authentication timeout must be at least one minute" });
+  }
+
+  const existingAuth = yield* captureAuth(cdpPort).pipe(Effect.option);
+  if (Option.isSome(existingAuth)) return existingAuth.value;
+
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  yield* spawner.string(ChildProcess.make("agent-browser", ["--version"])).pipe(
+    Effect.mapError(
+      (cause) =>
+        new CliError({
+          message: "agent-browser is required for Upwork authentication",
+          cause,
+        }),
+    ),
+  );
+
+  const openExisting = spawner.string(
+    ChildProcess.make("agent-browser", [
+      "--session",
+      "upwork-cli-auth",
+      "--cdp",
+      String(cdpPort),
+      "open",
+      UPWORK_LOGIN_URL,
+    ]),
+  );
+  const opened = yield* openExisting.pipe(Effect.option);
+
+  if (Option.isNone(opened)) {
+    const home = yield* userHome;
+    const specs = chromeLaunchSpecs(cdpPort, `${home}/.upwork-cli-chrome`, UPWORK_LOGIN_URL);
+    const [first, ...rest] = specs;
+    let launch = spawner.string(ChildProcess.make(first.executable, first.args));
+    for (const spec of rest) {
+      launch = launch.pipe(
+        Effect.matchEffect({
+          onFailure: () => spawner.string(ChildProcess.make(spec.executable, spec.args)),
+          onSuccess: Effect.succeed,
+        }),
+      );
+    }
+    yield* launch.pipe(
+      Effect.mapError(
+        (cause) =>
+          new CliError({
+            message: "Could not find or launch Google Chrome",
+            cause,
+          }),
+      ),
+    );
+  }
+
+  yield* Console.log("Chrome is ready. Log in to Upwork in the opened window.");
+  yield* Console.log(`Waiting up to ${timeoutMinutes} minutes for authentication...`);
+
+  return yield* captureAuth(cdpPort).pipe(
+    Effect.retry({
+      schedule: Schedule.spaced("2 seconds"),
+      times: timeoutMinutes * 30,
+    }),
+    Effect.timeoutOrElse({
+      duration: `${timeoutMinutes} minutes`,
+      orElse: () =>
+        Effect.fail(
+          new CliError({
+            message: "Timed out waiting for Upwork authentication",
+          }),
+        ),
+    }),
+  );
 });

@@ -23,23 +23,23 @@ The npm package ships TypeScript source with a Bun shebang. Installing it throug
 
 ## Authenticate
 
-Start a dedicated Chrome profile with the Chrome DevTools Protocol enabled. On macOS:
+Run:
 
 ```bash
-open -na "Google Chrome" --args \
-  --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.upwork-cli-chrome"
+upwork auth login
 ```
 
-Log in to Upwork in that window and complete any CAPTCHA yourself. Then capture the authenticated state:
+The CLI launches a dedicated Chrome profile on macOS, Windows, or Linux and opens Upwork. Log in and complete any CAPTCHA in that window. The CLI waits for the authenticated session, captures it, secures the state file, and exits.
+
+The default CDP port is `9222`, and the default timeout is 10 minutes:
 
 ```bash
-upwork auth capture --cdp 9222
+upwork auth login --cdp 9333 --timeout-minutes 15
 ```
 
-The CLI stores the state at `~/.config/upwork-cli/state.json` with `0600` permissions. Do not print, share, or commit this file.
+If Chrome is already running with CDP enabled, the CLI reuses it. `upwork auth capture --cdp 9222` remains available as a manual fallback.
 
-Chrome can be closed after capture. Search, find, and job-detail commands use direct HTTP requests.
+The CLI stores the state at `~/.config/upwork-cli/state.json` with `0600` permissions. Do not print, share, or commit this file. Search, find, and job-detail commands use direct HTTP requests after authentication.
 
 ## Search jobs
 
