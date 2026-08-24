@@ -66,6 +66,7 @@ Ask for the user's search terms and constraints before running `find`. Pass one 
 upwork find \
   --sort relevance \
   --max-proposals 15 \
+  --max-results 20 \
   --experience expert \
   --job-type hourly \
   --client-hires 10-plus \
@@ -78,7 +79,8 @@ Defaults and controls:
 
 - Payment-verified clients are required by default. Use `--include-unverified` to opt out.
 - `--max-proposals` applies an exact cap after results are fetched.
-- Multiple queries are deduplicated by Upwork job ID.
+- `--max-results` limits the compact summaries returned after deduplication.
+- Multiple queries run independently and are deduplicated by Upwork job ID.
 - `--sort recency` orders the combined result by publication time.
 - `--sort relevance` preserves each query's Upwork ranking while combining the results.
 - `--posted-within` requires `--sort recency`.
@@ -89,10 +91,13 @@ Run `upwork find --help` for proposal ranges, budgets, duration, workload, clien
 
 The response contains:
 
-- `jobs`: the combined shortlist.
-- `queries`: paging and scanned-page metadata for each query.
+- `meta.cliVersion`: the installed CLI version.
+- `jobs`: compact summaries without job descriptions. Each job includes `matchedQueries`.
+- `queries`: one status per query. Successful entries include paging data; failed entries include the error.
 - `filters`: the applied settings.
-- `scannedPages`: the total pages scanned across queries.
+- `scannedPages`: the total pages scanned across successful queries.
+
+Run one multi-query `find`, inspect `queries[].status`, then call `upwork job` only for promising jobs. Retry an individual query only when its status is `error`.
 
 ## Inspect shortlisted jobs
 

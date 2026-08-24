@@ -32,7 +32,7 @@ const SearchResponse = Schema.Struct({
               upworkHistoryData: Schema.Struct({
                 client: Schema.Struct({
                   paymentVerificationStatus: Schema.NullOr(Schema.String),
-                  country: Schema.String,
+                  country: Schema.NullOr(Schema.String),
                   totalReviews: Schema.Int,
                   totalFeedback: Schema.Finite,
                   totalSpent: Money,

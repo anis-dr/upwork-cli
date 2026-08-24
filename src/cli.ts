@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { BunRuntime, BunServices, BunSocket } from "@effect/platform-bun";
-import { Array, Clock, Console, Effect, Layer, Option, Schema } from "effect";
+import { Array, Clock, Console, Effect, Layer, Option, Result, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import packageJson from "../package.json" with { type: "json" };
@@ -182,7 +182,13 @@ const jobInput = Argument.string("job").pipe(
   Argument.withDescription("Upwork job URL, ciphertext, or ID"),
 );
 const jobCommand = Command.make("job", { job: jobInput }, ({ job }) =>
-  getJob(job).pipe(Effect.flatMap(printJson)),
+  Effect.gen(function* () {
+    const result = yield* getJob(job);
+    return yield* printJson({
+      meta: { cliVersion: packageJson.version },
+      ...result,
+    });
+  }),
 ).pipe(Command.withDescription("Return complete data for one Upwork job"));
 
 const findQueries = Argument.string("query").pipe(
@@ -197,6 +203,10 @@ const pageSizeFlag = Flag.integer("page-size").pipe(
   Flag.withDefault(20),
   Flag.withDescription("Jobs fetched per page for each query, from 1 to 50"),
 );
+const maxResultsFlag = Flag.integer("max-results").pipe(
+  Flag.withDefault(20),
+  Flag.withDescription("Maximum deduplicated jobs returned"),
+);
 const includeUnverifiedFlag = Flag.boolean("include-unverified").pipe(
   Flag.withDefault(false),
   Flag.withDescription("Include clients without verified payment"),
@@ -208,12 +218,18 @@ interface FindJob {
   readonly publishedAt: string;
 }
 
+interface FindQueryJobs<Job extends FindJob> {
+  readonly query: string;
+  readonly jobs: ReadonlyArray<Job>;
+}
+
 const mergeFindJobLists = <Job extends FindJob>(
-  jobLists: ReadonlyArray<ReadonlyArray<Job>>,
+  queryResults: ReadonlyArray<FindQueryJobs<Job>>,
   sort: "relevance" | "recency",
   maxProposals: number,
-): Array<Job> => {
+): Array<Job & { readonly matchedQueries: ReadonlyArray<string> }> => {
   const seen = new Set<string>();
+  const matchedQueriesById = new Map<string, Array<string>>();
   const jobs: Array<Job> = [];
   const addJob = (job: Job) => {
     if (seen.has(job.id) || job.proposals > maxProposals) return;
@@ -221,28 +237,45 @@ const mergeFindJobLists = <Job extends FindJob>(
     jobs.push(job);
   };
 
-  if (sort === "recency") {
-    for (const list of jobLists) {
-      for (const job of list) addJob(job);
-    }
-    jobs.sort((left, right) => right.publishedAt.localeCompare(left.publishedAt));
-    return jobs;
-  }
-
-  let index = 0;
-  let hasJobs = true;
-  while (hasJobs) {
-    hasJobs = false;
-    for (const list of jobLists) {
-      const candidate = Option.fromNullishOr(list[index]);
-      if (Option.isSome(candidate)) {
-        hasJobs = true;
-        addJob(candidate.value);
+  for (const result of queryResults) {
+    for (const job of result.jobs) {
+      if (job.proposals > maxProposals) continue;
+      const matchedQueries = Option.fromNullishOr(matchedQueriesById.get(job.id));
+      if (Option.isSome(matchedQueries)) {
+        if (!matchedQueries.value.includes(result.query)) matchedQueries.value.push(result.query);
+      } else {
+        matchedQueriesById.set(job.id, [result.query]);
       }
     }
-    index += 1;
   }
-  return jobs;
+
+  if (sort === "recency") {
+    for (const result of queryResults) {
+      for (const job of result.jobs) addJob(job);
+    }
+    jobs.sort((left, right) => right.publishedAt.localeCompare(left.publishedAt));
+  } else {
+    let index = 0;
+    let hasJobs = true;
+    while (hasJobs) {
+      hasJobs = false;
+      for (const result of queryResults) {
+        const candidate = Option.fromNullishOr(result.jobs[index]);
+        if (Option.isSome(candidate)) {
+          hasJobs = true;
+          addJob(candidate.value);
+        }
+      }
+      index += 1;
+    }
+  }
+
+  return jobs.map((job) => ({
+    ...job,
+    matchedQueries: Option.fromNullishOr(matchedQueriesById.get(job.id)).pipe(
+      Option.getOrElse(() => []),
+    ),
+  }));
 };
 
 const findCommand = Command.make(
@@ -251,6 +284,7 @@ const findCommand = Command.make(
     queries: findQueries,
     maxProposals: maxProposalsFlag,
     pageSize: pageSizeFlag,
+    maxResults: maxResultsFlag,
     sort: sortFlag,
     includeUnverified: includeUnverifiedFlag,
     proposals: proposalsFlag,
@@ -271,6 +305,11 @@ const findCommand = Command.make(
           message: "Maximum proposals cannot be negative",
         });
       }
+      if (config.maxResults < 1) {
+        return yield* new CliError({
+          message: "Maximum results must be at least 1",
+        });
+      }
       if (config.postedWithin !== "any" && config.sort === "relevance") {
         return yield* new CliError({
           message: "--posted-within requires --sort recency",
@@ -279,7 +318,7 @@ const findCommand = Command.make(
 
       const postedAfter = yield* getPostedAfter(config.postedWithin);
       const selectedQueries = config.queries;
-      const responses = yield* Effect.forEach(
+      const outcomes = yield* Effect.forEach(
         selectedQueries,
         (query) => {
           const options = applySearchFilters(
@@ -302,28 +341,72 @@ const findCommand = Command.make(
             },
             config,
           );
-          return searchJobs(options);
+          return searchJobs(options).pipe(Effect.result);
         },
         { concurrency: 2 },
       );
+      const queryOutcomes = Array.zip(selectedQueries, outcomes);
+      const successful = queryOutcomes.flatMap(([query, outcome]) => {
+        if (Result.isFailure(outcome)) return [];
+        return [{ query, response: outcome.success }];
+      });
+      const queryMetadata = queryOutcomes.map(([query, outcome]) => {
+        if (Result.isFailure(outcome)) {
+          return {
+            query,
+            status: "error",
+            error: outcome.failure.message,
+          };
+        }
+        return {
+          query,
+          status: "ok",
+          paging: outcome.success.paging,
+          scannedPages: outcome.success.scannedPages,
+        };
+      });
+      if (successful.length === 0) {
+        const failures = queryOutcomes.flatMap(([query, outcome]) => {
+          if (Result.isSuccess(outcome)) return [];
+          return [`${query}: ${outcome.failure.message}`];
+        });
+        return yield* new CliError({
+          message: `upwork-cli ${packageJson.version}: all queries failed. ${failures.join("; ")}`,
+        });
+      }
 
-      const jobs = mergeFindJobLists(
-        responses.map((response) => response.jobs),
+      const mergedJobs = mergeFindJobLists(
+        successful.map(({ query, response }) => ({ query, jobs: response.jobs })),
         config.sort,
         config.maxProposals,
       );
-      const queryMetadata = Array.zip(selectedQueries, responses).map(([query, response]) => ({
-        query,
-        paging: response.paging,
-        scannedPages: response.scannedPages,
+      const jobs = mergedJobs.slice(0, config.maxResults).map((job) => ({
+        id: job.id,
+        ciphertext: job.ciphertext,
+        url: job.url,
+        title: job.title,
+        skills: job.skills.map((skill) => skill.name),
+        type: job.type,
+        hourlyBudget: job.hourlyBudget,
+        fixedPriceBudget: job.fixedPriceBudget,
+        experienceLevel: job.experienceLevel,
+        publishedAt: job.publishedAt,
+        proposals: job.proposals,
+        applied: job.applied,
+        client: job.client,
+        matchedQueries: job.matchedQueries,
       }));
 
       return yield* printJson({
+        meta: {
+          cliVersion: packageJson.version,
+        },
         contentTrust: "untrusted",
         queries: queryMetadata,
         filters: {
           paymentVerified: !config.includeUnverified,
           maxProposals: config.maxProposals,
+          maxResults: config.maxResults,
           sort: config.sort,
           pageSize: config.pageSize,
           proposals: config.proposals,
@@ -336,7 +419,7 @@ const findCommand = Command.make(
           contractToHire: config.contractToHire,
           postedWithin: config.postedWithin,
         },
-        scannedPages: responses.reduce((total, response) => total + response.scannedPages, 0),
+        scannedPages: successful.reduce((total, { response }) => total + response.scannedPages, 0),
         jobs,
       });
     }),
