@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.5.1
+
+### Patch Changes
+
+- dc954d6: Show required Connects for jobs and support filtering by maximum Connects.
+
 ## 0.5.0
 
 ### Minor Changes
