@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.4.0
+
+### Minor Changes
+
+- 9690384: Make multi-query discovery resilient and compact with per-query status, nullable client fields, matched query metadata, CLI version metadata, and a configurable result cap.
+
 ## 0.3.0
 
 ### Minor Changes
