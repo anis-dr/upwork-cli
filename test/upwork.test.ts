@@ -15,6 +15,7 @@ import { HttpClient, HttpServerResponse } from "effect/unstable/http";
 import { searchJobs } from "../src/upwork.ts";
 
 const CapturedRequest = Schema.Struct({
+  query: Schema.String,
   variables: Schema.Struct({
     requestVariables: Schema.Struct({
       sort: Schema.String,
@@ -42,7 +43,7 @@ const BodyJson = Schema.TaggedStruct("Uint8Array", {
 const decodeBodyJson = Schema.decodeUnknownEffect(BodyJson);
 const decodeCapturedRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(CapturedRequest));
 
-const authState = `{"cookies":[{"name":"80a415d2sb","value":"token","domain":".upwork.com","path":"/"},{"name":"current_organization_uid","value":"tenant","domain":".upwork.com","path":"/"}]}`;
+const authState = `{"cookies":[{"name":"oauth2_global_js_token","value":"valid-opaque-token","domain":".upwork.com","path":"/"},{"name":"current_organization_uid","value":"tenant","domain":".upwork.com","path":"/"}]}`;
 
 class SearchTestHarness extends Context.Service<
   SearchTestHarness,
@@ -106,6 +107,20 @@ const searchTestLayer = <Response extends Schema.Json>(responses: ReadonlyArray<
         Effect.fnUntraced(function* (request) {
           const bodyJson = yield* decodeBodyJson(request.body.toJSON()).pipe(Effect.orDie);
           const body = yield* decodeCapturedRequest(bodyJson.body).pipe(Effect.orDie);
+          if (body.query.includes("AuthValidation")) {
+            const validation = yield* HttpServerResponse.json({
+              data: {
+                search: {
+                  universalSearchNuxt: {
+                    userJobSearchV1: {
+                      paging: { total: 1 },
+                    },
+                  },
+                },
+              },
+            }).pipe(Effect.orDie);
+            return HttpServerResponse.toClientResponse(validation, { request });
+          }
           yield* Ref.update(captured, (requests) => [...requests, body]);
 
           const index = yield* Ref.getAndUpdate(responseIndex, (current) => current + 1);

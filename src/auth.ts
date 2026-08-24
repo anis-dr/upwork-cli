@@ -1,4 +1,5 @@
 import { Config, Console, Effect, FileSystem, Option, Path, Schedule, Schema } from "effect";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const BrowserCookie = Schema.Struct({
@@ -10,6 +11,73 @@ const BrowserCookie = Schema.Struct({
 
 const BrowserState = Schema.Struct({
   cookies: Schema.Array(BrowserCookie),
+});
+
+const AuthValidationResponse = Schema.Struct({
+  data: Schema.Struct({
+    search: Schema.Struct({
+      universalSearchNuxt: Schema.Struct({
+        userJobSearchV1: Schema.Struct({
+          paging: Schema.Struct({
+            total: Schema.Int,
+          }),
+        }),
+      }),
+    }),
+  }),
+});
+
+const AUTH_VALIDATION_QUERY = `
+query AuthValidation($requestVariables: UserJobSearchV1Request!) {
+  search {
+    universalSearchNuxt {
+      userJobSearchV1(request: $requestVariables) {
+        paging { total }
+      }
+    }
+  }
+}`;
+
+const isJwtLike = (value: string) => {
+  const segments = value.split(".");
+  return (
+    segments.length === 3 &&
+    segments.every((segment) => segment.length > 0 && /^[A-Za-z0-9_-]+$/.test(segment))
+  );
+};
+
+const bearerCandidatePriority = (cookie: typeof BrowserCookie.Type) => {
+  if (cookie.name === "oauth2_global_js_token") return 0;
+  if (/^[a-f0-9]+sb$/i.test(cookie.name)) return 1;
+  if (/token/i.test(cookie.name)) return 2;
+  return 3;
+};
+
+const validateBearerToken = Effect.fnUntraced(function* (bearerToken: string, tenantId: string) {
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  yield* HttpClientRequest.post("https://www.upwork.com/api/graphql/v1?alias=userJobSearch").pipe(
+    HttpClientRequest.acceptJson,
+    HttpClientRequest.bearerToken(bearerToken),
+    HttpClientRequest.setHeader("x-upwork-api-tenantid", tenantId),
+    HttpClientRequest.setHeader("referer", "https://www.upwork.com/"),
+    HttpClientRequest.bodyJsonUnsafe({
+      query: AUTH_VALIDATION_QUERY,
+      variables: {
+        requestVariables: {
+          userQuery: "TypeScript",
+          sort: "recency+desc",
+          highlight: false,
+          paging: {
+            offset: 0,
+            count: 1,
+          },
+        },
+      },
+    }),
+    client.execute,
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(AuthValidationResponse)),
+  );
+  return bearerToken;
 });
 
 const decodeBrowserState = Schema.decodeUnknownEffect(Schema.fromJsonString(BrowserState));
@@ -85,16 +153,38 @@ export const loadAuth = Effect.fn("Auth.load")(function* () {
       (cause) => new CliError({ message: `Invalid browser state at ${path}`, cause }),
     ),
   );
-  const bearerToken = Option.fromNullishOr(
-    state.cookies.find((cookie) => cookie.name === "80a415d2sb")?.value,
-  );
   const tenantId = Option.fromNullishOr(
     state.cookies.find((cookie) => cookie.name === "current_organization_uid")?.value,
   );
-
-  if (Option.isNone(bearerToken) || Option.isNone(tenantId)) {
+  if (Option.isNone(tenantId)) {
     return yield* new CliError({
-      message: "The captured browser state is not an authenticated Upwork session",
+      message: "The captured browser state has no Upwork organization",
+    });
+  }
+
+  const seenCandidates = new Set<string>();
+  const candidates: Array<string> = [];
+  const cookiesByPriority = [...state.cookies].sort(
+    (left, right) => bearerCandidatePriority(left) - bearerCandidatePriority(right),
+  );
+  for (const cookie of cookiesByPriority) {
+    if (!cookie.domain.endsWith("upwork.com")) continue;
+    if (bearerCandidatePriority(cookie) === 3 && !isJwtLike(cookie.value)) continue;
+    if (seenCandidates.has(cookie.value)) continue;
+    seenCandidates.add(cookie.value);
+    candidates.push(cookie.value);
+  }
+  let bearerToken = Option.none<string>();
+  for (const candidate of candidates) {
+    const validated = yield* validateBearerToken(candidate, tenantId.value).pipe(Effect.option);
+    if (Option.isSome(validated)) {
+      bearerToken = validated;
+      break;
+    }
+  }
+  if (Option.isNone(bearerToken)) {
+    return yield* new CliError({
+      message: "The captured browser state has no valid Upwork session",
     });
   }
 
@@ -180,41 +270,27 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
     ),
   );
 
-  const openExisting = spawner.string(
-    ChildProcess.make("agent-browser", [
-      "--session",
-      "upwork-cli-auth",
-      "--cdp",
-      String(cdpPort),
-      "open",
-      UPWORK_LOGIN_URL,
-    ]),
-  );
-  const opened = yield* openExisting.pipe(Effect.option);
-
-  if (Option.isNone(opened)) {
-    const home = yield* userHome;
-    const specs = chromeLaunchSpecs(cdpPort, `${home}/.upwork-cli-chrome`, UPWORK_LOGIN_URL);
-    const [first, ...rest] = specs;
-    let launch = spawner.string(ChildProcess.make(first.executable, first.args));
-    for (const spec of rest) {
-      launch = launch.pipe(
-        Effect.matchEffect({
-          onFailure: () => spawner.string(ChildProcess.make(spec.executable, spec.args)),
-          onSuccess: Effect.succeed,
-        }),
-      );
-    }
-    yield* launch.pipe(
-      Effect.mapError(
-        (cause) =>
-          new CliError({
-            message: "Could not find or launch Google Chrome",
-            cause,
-          }),
-      ),
+  const home = yield* userHome;
+  const specs = chromeLaunchSpecs(cdpPort, `${home}/.upwork-cli-chrome`, UPWORK_LOGIN_URL);
+  const [first, ...rest] = specs;
+  let launch = spawner.string(ChildProcess.make(first.executable, first.args));
+  for (const spec of rest) {
+    launch = launch.pipe(
+      Effect.matchEffect({
+        onFailure: () => spawner.string(ChildProcess.make(spec.executable, spec.args)),
+        onSuccess: Effect.succeed,
+      }),
     );
   }
+  yield* launch.pipe(
+    Effect.mapError(
+      (cause) =>
+        new CliError({
+          message: "Could not find or launch Google Chrome",
+          cause,
+        }),
+    ),
+  );
 
   yield* Console.log("Chrome is ready. Log in to Upwork in the opened window.");
   yield* Console.log(`Waiting up to ${timeoutMinutes} minutes for authentication...`);
