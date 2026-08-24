@@ -9,6 +9,7 @@ import { captureAuthenticatedSession, UpworkCliError, authenticate } from "./aut
 import {
   getJobDetails,
   findJobsForQuery,
+  getRequiredConnects,
   type BudgetRange,
   type ClientHires,
   type ExperienceLevel,
@@ -202,6 +203,10 @@ const maxProposalsFlag = Flag.integer("max-proposals").pipe(
   Flag.withDefault(20),
   Flag.withDescription("Drop jobs above this applicant count"),
 );
+const maxConnectsFlag = Flag.integer("max-connects").pipe(
+  Flag.withDescription("Drop jobs requiring more than this many Connects"),
+  Flag.optional,
+);
 const pageSizeFlag = Flag.integer("page-size").pipe(
   Flag.withDefault(20),
   Flag.withDescription("Jobs fetched per page for each query, from 1 to 50"),
@@ -288,6 +293,7 @@ const findCommand = Command.make(
   {
     queries: queryArguments,
     maxProposals: maxProposalsFlag,
+    maxConnects: maxConnectsFlag,
     pageSize: pageSizeFlag,
     maxResults: maxResultsFlag,
     sort: sortFlag,
@@ -308,6 +314,11 @@ const findCommand = Command.make(
       if (config.maxProposals < 0) {
         return yield* new UpworkCliError({
           message: "Maximum proposals cannot be negative",
+        });
+      }
+      if (Option.exists(config.maxConnects, (maxConnects) => maxConnects < 0)) {
+        return yield* new UpworkCliError({
+          message: "Maximum Connects cannot be negative",
         });
       }
       if (config.maxResults < 1) {
@@ -388,7 +399,23 @@ const findCommand = Command.make(
         config.sort,
         config.maxProposals,
       );
-      const jobSummaries = mergedJobs.slice(0, config.maxResults).map((job) => ({
+      const connectsCandidates = Option.match(config.maxConnects, {
+        onNone: () => mergedJobs.slice(0, config.maxResults),
+        onSome: () => mergedJobs,
+      });
+      const requiredConnects = yield* getRequiredConnects(connectsCandidates.map((job) => job.id));
+      const selectedJobs = connectsCandidates
+        .filter((job) =>
+          Option.match(config.maxConnects, {
+            onNone: () => true,
+            onSome: (maximum) =>
+              Option.fromNullishOr(requiredConnects[job.id]).pipe(
+                Option.exists((required) => required <= maximum),
+              ),
+          }),
+        )
+        .slice(0, config.maxResults);
+      const jobSummaries = selectedJobs.map((job) => ({
         searchResultId: job.id,
         jobReference: job.jobReference,
         url: job.url,
@@ -400,6 +427,7 @@ const findCommand = Command.make(
         experienceLevel: job.experienceLevel,
         publishedAt: job.publishedAt,
         proposals: Option.getOrNull(job.proposals),
+        requiredConnects: Option.fromNullishOr(requiredConnects[job.id]).pipe(Option.getOrNull),
         applied: job.applied,
         client: job.client,
         matchedQueries: job.matchedQueries,
@@ -414,6 +442,7 @@ const findCommand = Command.make(
         filters: {
           paymentVerified: !config.includeUnverified,
           maxProposals: config.maxProposals,
+          maxConnects: Option.getOrNull(config.maxConnects),
           maxResults: config.maxResults,
           sort: config.sort,
           pageSize: config.pageSize,
