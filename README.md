@@ -52,6 +52,7 @@ upwork find \
   --sort recency \
   --posted-within 3d \
   --max-proposals 20 \
+  --max-results 20 \
   --experience expert \
   --client-hires 10-plus \
   --page-size 20 \
@@ -59,7 +60,11 @@ upwork find \
   "AI agent TypeScript"
 ```
 
-`find` runs each query, deduplicates jobs by ID, and applies the exact client-side proposal cap. It limits results to payment-verified clients unless `--include-unverified` is present.
+`find` runs each query independently, deduplicates jobs by ID, applies the exact client-side proposal cap, and returns at most `--max-results` compact summaries. It limits results to payment-verified clients unless `--include-unverified` is present.
+
+One failed query does not discard successful queries. Each `queries` entry reports `status: "ok"` with paging metadata or `status: "error"` with the query error.
+
+Compact results omit job descriptions and include the queries that matched each job. Use `upwork job <id-or-url>` for complete details.
 
 Sorting is explicit:
 
@@ -90,6 +95,7 @@ Run `upwork find --help` for the accepted values.
 | `--include-unverified` | Opt out of the verified-client default                       |
 | `--proposals`          | Select an Upwork proposal-count range                        |
 | `--max-proposals`      | Apply an exact client-side proposal cap                      |
+| `--max-results`        | Limit compact jobs returned after deduplication              |
 | `--experience`         | Select entry, intermediate, or expert work                   |
 | `--job-type`           | Select hourly or fixed-price work                            |
 | `--fixed-budget`       | Select a fixed-price budget range                            |
@@ -104,10 +110,13 @@ Run `upwork find --help` for the accepted values.
 
 ## JSON safety
 
-Every result has:
+`find` and `job` results include the CLI version and trust marker:
 
 ```json
 {
+  "meta": {
+    "cliVersion": "<installed version>"
+  },
   "contentTrust": "untrusted"
 }
 ```

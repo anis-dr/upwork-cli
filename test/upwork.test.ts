@@ -52,7 +52,7 @@ class SearchTestHarness extends Context.Service<
   }
 >()("upwork-cli/test/SearchTestHarness") {}
 
-const makeJob = (id: string, publishedAt: string) => ({
+const makeJob = (id: string, publishedAt: string, country: Option.Option<string>) => ({
   id,
   title: `Job ${id}`,
   description: `Description ${id}`,
@@ -61,7 +61,7 @@ const makeJob = (id: string, publishedAt: string) => ({
   upworkHistoryData: {
     client: {
       paymentVerificationStatus: "VERIFIED",
-      country: "US",
+      country: Option.getOrNull(country),
       totalReviews: 10,
       totalFeedback: 5,
       totalSpent: { isoCurrencyCode: "USD", amount: "1000" },
@@ -196,12 +196,18 @@ it.layer(filterLayer)("search request filters", (it) => {
 
 const recencyLayer = searchTestLayer([
   makeResponse(
-    [makeJob("1", "2026-08-23T00:00:00.000Z"), makeJob("2", "2026-08-22T12:00:00.000Z")],
+    [
+      makeJob("1", "2026-08-23T00:00:00.000Z", Option.some("US")),
+      makeJob("2", "2026-08-22T12:00:00.000Z", Option.some("US")),
+    ],
     0,
     4,
   ),
   makeResponse(
-    [makeJob("3", "2026-08-22T01:00:00.000Z"), makeJob("4", "2026-08-21T23:59:59.000Z")],
+    [
+      makeJob("3", "2026-08-22T01:00:00.000Z", Option.some("US")),
+      makeJob("4", "2026-08-21T23:59:59.000Z", Option.some("US")),
+    ],
     2,
     4,
   ),
@@ -242,6 +248,39 @@ it.layer(recencyLayer)("search recency pagination", (it) => {
         offsets: [0, 2],
         sorts: ["recency+desc", "recency+desc"],
       });
+    }),
+  );
+});
+
+const nullableCountryLayer = searchTestLayer([
+  makeResponse([makeJob("nullable-country", "2026-08-23T00:00:00.000Z", Option.none())], 0, 1),
+]);
+
+it.layer(nullableCountryLayer)("nullable search fields", (it) => {
+  it.effect("accepts a client without a country", () =>
+    Effect.gen(function* () {
+      const result = yield* searchJobs({
+        query: "TypeScript",
+        page: 1,
+        limit: 1,
+        sort: "relevance",
+        verified: true,
+        proposals: Option.none(),
+        experience: Option.none(),
+        jobType: Option.none(),
+        budget: Option.none(),
+        clientHires: Option.none(),
+        duration: Option.none(),
+        workload: Option.none(),
+        contractToHire: false,
+        postedAfter: Option.none(),
+        maxPages: 1,
+      });
+      const job = yield* Array.get(result.jobs, 0).pipe(
+        Effect.fromOption(() => "Missing nullable-country job"),
+      );
+
+      expect(Option.isNone(Option.fromNullishOr(job.client.country))).toBe(true);
     }),
   );
 });
