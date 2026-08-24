@@ -123,13 +123,17 @@ bun install
 bun run setup
 bun run test
 bun run check
+bun run changeset
 ```
 
 - `bun run setup` patches TypeScript 7 and Oxlint with Effect tsgo.
 - `bun run test` starts Vitest in watch mode.
 - `bun run check` runs type checking, Effect diagnostics, Oxlint, Oxfmt verification, and the test suite.
+- `bun run changeset` records the release type and user-facing note for a package change.
 
 The repository uses the published `oxlint-plugin-effect` package and a reviewed copy of `anti-slop` under `tools/oxlint/anti-slop/`.
+
+Any change to commands, flags, defaults, output, authentication, or installation behavior must update both `README.md` and `skills/upwork-cli/SKILL.md` in the same pull request.
 
 ## Trunk workflow
 
@@ -139,28 +143,20 @@ Direct pushes, force pushes, and branch deletion are blocked on `main`.
 
 ## Release
 
-The npm workflow publishes version tags that point to `main`. The tag must match the version in `package.json`.
+Changesets owns package versions and `CHANGELOG.md`. Bun owns installation, validation, and npm publishing.
 
-1. Create a short release branch and update the version:
+For every user-visible package change:
 
-   ```bash
-   git switch -c release/v0.1.1
-   bun pm pkg set version=0.1.1
-   bun install --lockfile-only
-   bun run check
-   ```
+1. Run `bun run changeset`.
+2. Select `patch`, `minor`, or `major`.
+3. Write the release note for CLI users.
+4. Commit the generated `.changeset/*.md` file with the pull request.
 
-2. Commit the version change, push the branch, and merge its pull request.
-3. Tag the merged commit:
+After the pull request merges, the `Release` workflow creates or updates a `Version Packages` pull request. That pull request consumes pending changesets, updates `package.json`, and appends to `CHANGELOG.md`.
 
-   ```bash
-   git switch main
-   git pull --ff-only
-   git tag v0.1.1
-   git push origin v0.1.1
-   ```
+Merging the Version Packages pull request triggers the workflow again. It runs the quality gate, publishes with `bun publish`, creates the version tag, and creates the GitHub release.
 
-The `Publish` workflow verifies the tag, reruns the quality gate, and calls `bun publish`. It reads the registry credential from the `NPM_TOKEN` secret in the `npm` GitHub environment.
+The workflow reads the registry credential from the `NPM_TOKEN` secret in the `npm` GitHub environment.
 
 ## License
 
