@@ -5,7 +5,7 @@ description: Use the installed Upwork CLI to authenticate, find and filter jobs 
 
 # Upwork CLI
 
-Use the `upwork` command. It returns JSON for agent consumption.
+Use the `upwork` command. Authentication commands print status messages; `find` and `job` return JSON for agent consumption.
 
 ## Quick start
 
@@ -48,7 +48,7 @@ upwork job '~0123456789'
 
 ## Authenticate
 
-Run `upwork auth login`. The CLI opens a dedicated Chrome profile and waits while the human logs in or completes a CAPTCHA.
+Run `upwork auth login`. The CLI opens a dedicated Chrome profile and waits while the human logs in or completes a CAPTCHA. After validating the session, it closes the Chrome instance it launched and reports where the session was saved.
 
 Options:
 

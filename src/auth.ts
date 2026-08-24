@@ -1,5 +1,6 @@
 import { Config, Console, Effect, FileSystem, Option, Path, Schedule, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { Socket } from "effect/unstable/socket";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const BrowserCookie = Schema.Struct({
@@ -25,6 +26,10 @@ const AuthValidationResponse = Schema.Struct({
       }),
     }),
   }),
+});
+
+const CdpVersion = Schema.Struct({
+  webSocketDebuggerUrl: Schema.String,
 });
 
 const AUTH_VALIDATION_QUERY = `
@@ -78,6 +83,26 @@ const validateBearerToken = Effect.fnUntraced(function* (bearerToken: string, te
     Effect.flatMap(HttpClientResponse.schemaBodyJson(AuthValidationResponse)),
   );
   return bearerToken;
+});
+
+const closeChromeBrowser = Effect.fnUntraced(function* (cdpPort: number) {
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const version = yield* HttpClientRequest.get(`http://127.0.0.1:${cdpPort}/json/version`).pipe(
+    client.execute,
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(CdpVersion)),
+  );
+  const socket = yield* Socket.makeWebSocket(version.webSocketDebuggerUrl, {
+    closeCodeIsError: () => false,
+    openTimeout: "5 seconds",
+  });
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      const write = yield* socket.writer;
+      yield* socket.runString(() => {}, {
+        onOpen: write('{"id":1,"method":"Browser.close"}').pipe(Effect.ignore),
+      });
+    }),
+  );
 });
 
 const decodeBrowserState = Schema.decodeUnknownEffect(Schema.fromJsonString(BrowserState));
@@ -257,7 +282,13 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   }
 
   const existingAuth = yield* captureAuth(cdpPort).pipe(Effect.option);
-  if (Option.isSome(existingAuth)) return existingAuth.value;
+  if (Option.isSome(existingAuth)) {
+    return {
+      ...existingAuth.value,
+      wasAlreadyAuthenticated: true,
+      browserClosed: false,
+    };
+  }
 
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   yield* spawner.string(ChildProcess.make("agent-browser", ["--version"])).pipe(
@@ -295,7 +326,7 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   yield* Console.log("Chrome is ready. Log in to Upwork in the opened window.");
   yield* Console.log(`Waiting up to ${timeoutMinutes} minutes for authentication...`);
 
-  return yield* captureAuth(cdpPort).pipe(
+  const auth = yield* captureAuth(cdpPort).pipe(
     Effect.retry({
       schedule: Schedule.spaced("2 seconds"),
       times: timeoutMinutes * 30,
@@ -310,4 +341,16 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
         ),
     }),
   );
+  const browserClosed = yield* closeChromeBrowser(cdpPort).pipe(
+    Effect.timeoutOrElse({
+      duration: "5 seconds",
+      orElse: () => Effect.fail(new CliError({ message: "Chrome close timed out" })),
+    }),
+    Effect.option,
+  );
+  return {
+    ...auth,
+    wasAlreadyAuthenticated: false,
+    browserClosed: Option.isSome(browserClosed),
+  };
 });

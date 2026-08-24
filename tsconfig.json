@@ -8,6 +8,7 @@
     "types": ["bun"],
     "verbatimModuleSyntax": true,
     "rewriteRelativeImportExtensions": true,
+    "resolveJsonModule": true,
     "noEmit": true,
     "strict": true,
     "exactOptionalPropertyTypes": true,
