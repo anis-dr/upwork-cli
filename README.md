@@ -1,6 +1,6 @@
 # upwork-cli
 
-A read-only Upwork CLI for job discovery. It searches jobs, combines several searches into one shortlist, and returns full job details as JSON.
+A read-only Upwork CLI for job discovery. It combines one or more queries into a deduplicated shortlist and returns full job details as JSON.
 
 The CLI uses Upwork's authenticated HTTP APIs. Chrome is only involved when capturing authentication.
 
@@ -39,43 +39,32 @@ upwork auth login --cdp 9333 --timeout-minutes 15
 
 If Chrome is already running with CDP enabled, the CLI reuses it. `upwork auth capture --cdp 9222` remains available as a manual fallback.
 
-The CLI stores the state at `~/.config/upwork-cli/state.json` with `0600` permissions. Do not print, share, or commit this file. Search, find, and job-detail commands use direct HTTP requests after authentication.
+The CLI stores the state at `~/.config/upwork-cli/state.json` with `0600` permissions. Do not print, share, or commit this file. Find and job-detail commands use direct HTTP requests after authentication.
 
-## Search jobs
+## Find jobs
 
-Flags must come before the query.
-
-```bash
-upwork search \
-  --verified \
-  --sort recency \
-  --posted-within 7d \
-  --experience expert \
-  --job-type hourly \
-  --client-hires 10-plus \
-  --proposals 0-4 \
-  --limit 20 \
-  "Effect TypeScript"
-```
-
-`search` returns Upwork paging data, the number of pages scanned, and normalized jobs.
-
-## Build a shortlist
-
-`find` requires one or more explicit queries. It does not impose default search terms.
+`find` requires one or more explicit queries. It does not impose default search terms. Flags must come before the queries.
 
 ```bash
 upwork find \
+  --sort recency \
   --posted-within 3d \
   --max-proposals 20 \
   --experience expert \
   --client-hires 10-plus \
-  --per-query 20 \
+  --page-size 20 \
   "Effect TypeScript" \
   "AI agent TypeScript"
 ```
 
-`find` runs each query, deduplicates jobs by ID, applies the client-side proposal cap, and sorts the result newest-first. It limits results to payment-verified clients unless `--include-unverified` is present.
+`find` runs each query, deduplicates jobs by ID, and applies the exact client-side proposal cap. It limits results to payment-verified clients unless `--include-unverified` is present.
+
+Sorting is explicit:
+
+- `--sort recency` sorts the combined result by publication time.
+- `--sort relevance` preserves each query's Upwork ranking and merges the query results round-robin.
+
+Date filtering requires recency sorting. The response reports paging and scanned-page counts for every query.
 
 ## Read a job
 
@@ -90,16 +79,15 @@ The result contains the opening, qualifications, screening questions, client his
 
 ## Filters
 
-Run `upwork search --help` or `upwork find --help` for the accepted values.
+Run `upwork find --help` for the accepted values.
 
 | Filter                 | Purpose                                                      |
 | ---------------------- | ------------------------------------------------------------ |
 | `--posted-within`      | Keep jobs from the last 24 hours, 3 days, 7 days, or 30 days |
 | `--max-pages`          | Bound the pages scanned for a date filter                    |
-| `--verified`           | Require payment verification in `search`                     |
-| `--include-unverified` | Allow unverified clients in `find`                           |
+| `--include-unverified` | Opt out of the verified-client default                       |
 | `--proposals`          | Select an Upwork proposal-count range                        |
-| `--max-proposals`      | Apply an exact client-side proposal cap in `find`            |
+| `--max-proposals`      | Apply an exact client-side proposal cap                      |
 | `--experience`         | Select entry, intermediate, or expert work                   |
 | `--job-type`           | Select hourly or fixed-price work                            |
 | `--fixed-budget`       | Select a fixed-price budget range                            |
@@ -107,10 +95,10 @@ Run `upwork search --help` or `upwork find --help` for the accepted values.
 | `--duration`           | Filter by expected project duration                          |
 | `--workload`           | Filter by expected weekly workload                           |
 | `--contract-to-hire`   | Require a contract-to-hire job                               |
-| `--sort`               | Sort by relevance or recency                                 |
-| `--page`, `--limit`    | Control paging for a single search                           |
+| `--sort`               | Merge results by recency or per-query relevance              |
+| `--page-size`          | Set the jobs fetched per page for each query                 |
 
-When `--posted-within` is present, the CLI sorts by recency and scans until it reaches the cutoff, the end of the results, or `--max-pages`.
+`--posted-within` requires `--sort recency`. The CLI scans until it reaches the cutoff, the end of the results, or `--max-pages`.
 
 ## JSON safety
 

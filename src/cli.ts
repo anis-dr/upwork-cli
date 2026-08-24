@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { BunRuntime, BunServices } from "@effect/platform-bun";
-import { Clock, Console, Effect, Layer, Option, Schema } from "effect";
+import { Array, Clock, Console, Effect, Layer, Option, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
 import { captureAuth, CliError, loginAuth } from "./auth.ts";
@@ -50,24 +50,9 @@ const authCommand = Command.make("auth").pipe(
   Command.withSubcommands([loginCommand, captureCommand]),
 );
 
-const queryArgument = Argument.string("query").pipe(
-  Argument.withDescription("Upwork job search query"),
-);
-const pageFlag = Flag.integer("page").pipe(
-  Flag.withDefault(1),
-  Flag.withDescription("Results page, starting at 1"),
-);
-const limitFlag = Flag.integer("limit").pipe(
-  Flag.withDefault(10),
-  Flag.withDescription("Jobs per page, from 1 to 50"),
-);
 const sortFlag = Flag.choice("sort", ["relevance", "recency"]).pipe(
-  Flag.withDefault("relevance"),
-  Flag.withDescription("Result ordering"),
-);
-const verifiedFlag = Flag.boolean("verified").pipe(
-  Flag.withDefault(false),
-  Flag.withDescription("Only return payment-verified clients"),
+  Flag.withDefault("recency"),
+  Flag.withDescription("Combined result ordering"),
 );
 const proposalsFlag = Flag.choice("proposals", [
   "any",
@@ -174,53 +159,6 @@ const applySearchFilters = (base: SearchOptions, filters: CliSearchFilters): Sea
   return configured;
 };
 
-const searchCommand = Command.make(
-  "search",
-  {
-    query: queryArgument,
-    page: pageFlag,
-    limit: limitFlag,
-    sort: sortFlag,
-    verified: verifiedFlag,
-    proposals: proposalsFlag,
-    experience: experienceFlag,
-    jobType: jobTypeFlag,
-    budget: budgetFlag,
-    clientHires: clientHiresFlag,
-    duration: durationFlag,
-    workload: workloadFlag,
-    contractToHire: contractToHireFlag,
-    postedWithin: postedWithinFlag,
-    maxPages: maxPagesFlag,
-  },
-  (config) =>
-    Effect.gen(function* () {
-      const postedAfter = yield* getPostedAfter(config.postedWithin);
-      const options = applySearchFilters(
-        {
-          query: config.query,
-          page: config.page,
-          limit: config.limit,
-          sort: config.sort,
-          verified: config.verified,
-          proposals: Option.none(),
-          experience: Option.none(),
-          jobType: Option.none(),
-          budget: Option.none(),
-          clientHires: Option.none(),
-          duration: Option.none(),
-          workload: Option.none(),
-          contractToHire: config.contractToHire,
-          postedAfter,
-          maxPages: config.maxPages,
-        },
-        config,
-      );
-      const result = yield* searchJobs(options);
-      return yield* printJson(result);
-    }),
-).pipe(Command.withDescription("Search Upwork jobs"));
-
 const jobInput = Argument.string("job").pipe(
   Argument.withDescription("Upwork job URL, ciphertext, or ID"),
 );
@@ -236,21 +174,65 @@ const maxProposalsFlag = Flag.integer("max-proposals").pipe(
   Flag.withDefault(20),
   Flag.withDescription("Drop jobs above this applicant count"),
 );
-const perQueryFlag = Flag.integer("per-query").pipe(
+const pageSizeFlag = Flag.integer("page-size").pipe(
   Flag.withDefault(20),
-  Flag.withDescription("Jobs fetched for each query, from 1 to 50"),
+  Flag.withDescription("Jobs fetched per page for each query, from 1 to 50"),
 );
 const includeUnverifiedFlag = Flag.boolean("include-unverified").pipe(
   Flag.withDefault(false),
   Flag.withDescription("Include clients without verified payment"),
 );
 
+interface FindJob {
+  readonly id: string;
+  readonly proposals: number;
+  readonly publishedAt: string;
+}
+
+const mergeFindJobLists = <Job extends FindJob>(
+  jobLists: ReadonlyArray<ReadonlyArray<Job>>,
+  sort: "relevance" | "recency",
+  maxProposals: number,
+): Array<Job> => {
+  const seen = new Set<string>();
+  const jobs: Array<Job> = [];
+  const addJob = (job: Job) => {
+    if (seen.has(job.id) || job.proposals > maxProposals) return;
+    seen.add(job.id);
+    jobs.push(job);
+  };
+
+  if (sort === "recency") {
+    for (const list of jobLists) {
+      for (const job of list) addJob(job);
+    }
+    jobs.sort((left, right) => right.publishedAt.localeCompare(left.publishedAt));
+    return jobs;
+  }
+
+  let index = 0;
+  let hasJobs = true;
+  while (hasJobs) {
+    hasJobs = false;
+    for (const list of jobLists) {
+      const candidate = Option.fromNullishOr(list[index]);
+      if (Option.isSome(candidate)) {
+        hasJobs = true;
+        addJob(candidate.value);
+      }
+    }
+    index += 1;
+  }
+  return jobs;
+};
+
 const findCommand = Command.make(
   "find",
   {
     queries: findQueries,
     maxProposals: maxProposalsFlag,
-    perQuery: perQueryFlag,
+    pageSize: pageSizeFlag,
+    sort: sortFlag,
     includeUnverified: includeUnverifiedFlag,
     proposals: proposalsFlag,
     experience: experienceFlag,
@@ -270,6 +252,11 @@ const findCommand = Command.make(
           message: "Maximum proposals cannot be negative",
         });
       }
+      if (config.postedWithin !== "any" && config.sort === "relevance") {
+        return yield* new CliError({
+          message: "--posted-within requires --sort recency",
+        });
+      }
 
       const postedAfter = yield* getPostedAfter(config.postedWithin);
       const selectedQueries = config.queries;
@@ -280,8 +267,8 @@ const findCommand = Command.make(
             {
               query,
               page: 1,
-              limit: config.perQuery,
-              sort: "recency",
+              limit: config.pageSize,
+              sort: config.sort,
               verified: !config.includeUnverified,
               proposals: Option.none(),
               experience: Option.none(),
@@ -301,22 +288,25 @@ const findCommand = Command.make(
         { concurrency: 2 },
       );
 
-      const seen = new Set<string>();
-      const jobs = responses
-        .flatMap((response) => response.jobs)
-        .filter((job) => {
-          if (seen.has(job.id) || job.proposals > config.maxProposals) return false;
-          seen.add(job.id);
-          return true;
-        });
-      jobs.sort((left, right) => right.publishedAt.localeCompare(left.publishedAt));
+      const jobs = mergeFindJobLists(
+        responses.map((response) => response.jobs),
+        config.sort,
+        config.maxProposals,
+      );
+      const queryMetadata = Array.zip(selectedQueries, responses).map(([query, response]) => ({
+        query,
+        paging: response.paging,
+        scannedPages: response.scannedPages,
+      }));
 
       return yield* printJson({
         contentTrust: "untrusted",
-        queries: selectedQueries,
+        queries: queryMetadata,
         filters: {
           paymentVerified: !config.includeUnverified,
           maxProposals: config.maxProposals,
+          sort: config.sort,
+          pageSize: config.pageSize,
           proposals: config.proposals,
           experience: config.experience,
           jobType: config.jobType,
@@ -335,9 +325,9 @@ const findCommand = Command.make(
 
 const app = Command.make("upwork").pipe(
   Command.withDescription("Read-only Upwork CLI for agents"),
-  Command.withSubcommands([authCommand, searchCommand, jobCommand, findCommand]),
+  Command.withSubcommands([authCommand, jobCommand, findCommand]),
 );
 
 const mainLayer = Layer.merge(BunServices.layer, FetchHttpClient.layer);
 
-Command.run(app, { version: "0.1.0" }).pipe(Effect.provide(mainLayer), BunRuntime.runMain);
+Command.run(app, { version: "0.2.0" }).pipe(Effect.provide(mainLayer), BunRuntime.runMain);
