@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.5.0
+
+### Minor Changes
+
+- 59b5c03: Harden discovery against nullable Upwork fields, clarify job references in command output, and add optional OTLP traces and logs.
+
 ## 0.4.0
 
 ### Minor Changes
