@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.3.0
+
+### Minor Changes
+
+- b40ab8e: Close the dedicated Chrome instance after authentication and replace authentication JSON with short human-readable status messages.
+
 ## 0.2.1
 
 ### Patch Changes
