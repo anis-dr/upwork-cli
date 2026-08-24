@@ -1,6 +1,6 @@
-import { DateTime, Effect, Option, Schema } from "effect";
+import { Array as EffectArray, DateTime, Effect, Option, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import { UpworkCliError, loadAuthenticatedSession } from "./auth.ts";
+import { type AuthenticatedSession, UpworkCliError, loadAuthenticatedSession } from "./auth.ts";
 
 const Money = Schema.Struct({
   isoCurrencyCode: Schema.NullOr(Schema.String),
@@ -61,6 +61,27 @@ const JobQueryResponse = Schema.Struct({
 const JobDetailsResponse = Schema.Struct({
   data: Schema.Struct({
     jobAuthDetails: Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown)),
+  }),
+});
+
+const JobConnectsResponse = Schema.Struct({
+  data: Schema.Record(
+    Schema.String,
+    Schema.NullOr(
+      Schema.Struct({
+        price: Schema.Int,
+      }),
+    ),
+  ),
+});
+
+const JobDetailsOpening = Schema.Struct({
+  opening: Schema.Struct({
+    job: Schema.Struct({
+      info: Schema.Struct({
+        id: Schema.String,
+      }),
+    }),
   }),
 });
 
@@ -410,6 +431,9 @@ query JobAuthDetailsQuery(
   }
 }`;
 
+const CONNECTS_SUBORDINATE_CLIENT_ID = "bf67b73f06270a0cc87c5957bf1963fb";
+const CONNECTS_BATCH_SIZE = 9;
+
 export type JobSort = "relevance" | "recency";
 export type ProposalRange = "0-4" | "5-9" | "10-14" | "15-19" | "20-49";
 export type ExperienceLevel = "entry" | "intermediate" | "expert";
@@ -487,6 +511,90 @@ interface UserJobSearchVariables {
 
 const toUpworkRequestError = (message: string) => (cause: unknown) =>
   new UpworkCliError({ message, cause });
+
+const loadConnectsToken = Effect.fnUntraced(function* (session: AuthenticatedSession) {
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const script = yield* HttpClientRequest.get(
+    `https://auth.upwork.com/api/v3/oauth2/token/subordinate/v3/${CONNECTS_SUBORDINATE_CLIENT_ID}`,
+  ).pipe(
+    HttpClientRequest.setHeader("cookie", session.cookieHeader),
+    HttpClientRequest.setHeader("referer", "https://www.upwork.com/"),
+    client.execute,
+    Effect.flatMap((response) => response.text),
+    Effect.mapError(toUpworkRequestError("Could not load Upwork Connects authentication")),
+  );
+  const token = Option.fromNullishOr(script.match(/"token":"([^"]+)"/)).pipe(
+    Option.flatMap((match) => EffectArray.get(match, 1)),
+  );
+  if (Option.isNone(token)) {
+    return yield* new UpworkCliError({
+      message: "Upwork Connects authentication returned an unsupported response",
+    });
+  }
+  return token.value;
+});
+
+const fetchRequiredConnects = Effect.fnUntraced(function* (
+  session: AuthenticatedSession,
+  jobIds: ReadonlyArray<string>,
+) {
+  if (jobIds.length === 0) return {} satisfies Record<string, number>;
+  const token = yield* loadConnectsToken(session);
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const batches: Array<ReadonlyArray<string>> = [];
+  for (let index = 0; index < jobIds.length; index += CONNECTS_BATCH_SIZE) {
+    batches.push(jobIds.slice(index, index + CONNECTS_BATCH_SIZE));
+  }
+  const batchResults = yield* Effect.forEach(
+    batches,
+    Effect.fnUntraced(function* (batch) {
+      const variables = Object.fromEntries(batch.map((jobId, index) => [`job${index}`, jobId]));
+      const variableDefinitions = batch.map((_, index) => `$job${index}: ID!`).join(", ");
+      const fields = batch
+        .map((_, index) => `job${index}: jobConnectsPriceFreelancer(jobId: $job${index}) { price }`)
+        .join("\n");
+      const response = yield* HttpClientRequest.post(
+        "https://www.upwork.com/api/graphql/v1?alias=gql-query-get-connects-data",
+      ).pipe(
+        HttpClientRequest.acceptJson,
+        HttpClientRequest.bearerToken(token),
+        HttpClientRequest.setHeader("cookie", session.cookieHeader),
+        HttpClientRequest.setHeader("x-upwork-api-tenantid", session.tenantId),
+        HttpClientRequest.setHeader("referer", "https://www.upwork.com/"),
+        HttpClientRequest.bodyJsonUnsafe({
+          query: `query RequiredConnects(${variableDefinitions}) {\n${fields}\n}`,
+          variables,
+        }),
+        client.execute,
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(JobConnectsResponse)),
+        Effect.mapError(toUpworkRequestError("Could not load required Upwork Connects")),
+      );
+      return batch.map((jobId, index) => ({
+        jobId,
+        requiredConnects: Option.fromNullishOr(response.data[`job${index}`]).pipe(
+          Option.map(({ price }) => price),
+        ),
+      }));
+    }),
+    { concurrency: 3 },
+  );
+  const requiredConnects: Record<string, number> = {};
+  for (const batch of batchResults) {
+    for (const result of batch) {
+      if (Option.isSome(result.requiredConnects)) {
+        requiredConnects[result.jobId] = result.requiredConnects.value;
+      }
+    }
+  }
+  return requiredConnects;
+});
+
+export const getRequiredConnects = Effect.fn("Upwork.getRequiredConnects")(function* (
+  jobIds: ReadonlyArray<string>,
+) {
+  const session = yield* loadAuthenticatedSession();
+  return yield* fetchRequiredConnects(session, jobIds);
+});
 
 const validateJobQuery = (options: JobQuery) => {
   if (options.query.trim().length === 0) return Option.some("Search query cannot be empty");
@@ -696,10 +804,18 @@ export const getJobDetails = Effect.fn("Upwork.getJobDetails")(function* (input:
     });
   }
 
+  const opening = yield* Schema.decodeUnknownEffect(JobDetailsOpening)(details.value).pipe(
+    Effect.mapError(toUpworkRequestError(`Upwork job ${jobReference} has no opening identifier`)),
+  );
+  const requiredConnects = yield* fetchRequiredConnects(session, [opening.opening.job.info.id]);
+
   return {
     contentTrust: "untrusted",
     jobReference,
     url: `https://www.upwork.com/jobs/${jobReference}`,
+    requiredConnects: Option.fromNullishOr(requiredConnects[opening.opening.job.info.id]).pipe(
+      Option.getOrNull,
+    ),
     details: details.value,
   };
 });

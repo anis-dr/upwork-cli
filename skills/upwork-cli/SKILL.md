@@ -29,6 +29,7 @@ upwork find \
   --sort recency \
   --posted-within 3d \
   --max-proposals 20 \
+  --max-connects 15 \
   --page-size 20 \
   "Effect TypeScript" \
   "AI agent TypeScript"
@@ -66,6 +67,7 @@ Ask for the user's search terms and constraints before running `find`. Pass one 
 upwork find \
   --sort relevance \
   --max-proposals 15 \
+  --max-connects 15 \
   --max-results 20 \
   --experience expert \
   --job-type hourly \
@@ -79,6 +81,7 @@ Defaults and controls:
 
 - Payment-verified clients are required by default. Use `--include-unverified` to opt out.
 - `--max-proposals` applies an exact cap after results are fetched.
+- `--max-connects` applies an exact cap using each job's current application cost.
 - `--max-results` limits the compact summaries returned after deduplication.
 - Multiple queries run independently and are deduplicated by Upwork search result ID.
 - `--sort recency` orders the combined result by publication time.
@@ -92,7 +95,7 @@ Run `upwork find --help` for proposal ranges, budgets, duration, workload, clien
 The response contains:
 
 - `meta.cliVersion`: the installed CLI version.
-- `jobs`: compact summaries without job descriptions. Each job includes `searchResultId`, `jobReference`, and `matchedQueries`.
+- `jobs`: compact summaries without job descriptions. Each job includes `searchResultId`, `jobReference`, `requiredConnects`, and `matchedQueries`.
 - `queries`: one status per query. Successful entries include paging data; failed entries include the error.
 - `filters`: the applied settings.
 - `scannedPages`: the total pages scanned across successful queries.
@@ -108,7 +111,7 @@ upwork job '~0123456789'
 upwork job 'https://www.upwork.com/jobs/~0123456789'
 ```
 
-Read the opening under `details.opening`, client information under `details.buyer`, and account-specific match or application state under `details.currentUserInfo`.
+Read the required application cost under `requiredConnects`, the opening under `details.opening`, client information under `details.buyer`, and account-specific match or application state under `details.currentUserInfo`.
 
 Inspect the full job before recommending it. A verified client, low proposal count, or high spend does not by itself make a job a good match.
 
@@ -118,7 +121,7 @@ For each recommended job, give the user:
 
 - Title and URL.
 - Budget or rate.
-- Publication time and proposal count.
+- Publication time, proposal count, and required Connects.
 - Client payment status, rating, location, and spend when available.
 - Relevant skills and requirements.
 - A short fit assessment tied to the user's stated constraints.

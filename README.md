@@ -52,6 +52,7 @@ upwork find \
   --sort recency \
   --posted-within 3d \
   --max-proposals 20 \
+  --max-connects 15 \
   --max-results 20 \
   --experience expert \
   --client-hires 10-plus \
@@ -60,11 +61,11 @@ upwork find \
   "AI agent TypeScript"
 ```
 
-`find` runs each query independently, deduplicates jobs by ID, applies the exact client-side proposal cap, and returns at most `--max-results` compact summaries. It limits results to payment-verified clients unless `--include-unverified` is present.
+`find` runs each query independently, deduplicates jobs by ID, applies the exact client-side proposal and Connects caps, and returns at most `--max-results` compact summaries. It limits results to payment-verified clients unless `--include-unverified` is present.
 
 One failed query does not discard successful queries. Each `queries` entry reports `status: "ok"` with paging metadata or `status: "error"` with the query error.
 
-Compact results omit job descriptions and include `matchedQueries`. `searchResultId` identifies the discovery result for deduplication; `jobReference` is the value accepted by `upwork job`.
+Compact results omit job descriptions and include `requiredConnects` and `matchedQueries`. `searchResultId` identifies the discovery result for deduplication; `jobReference` is the value accepted by `upwork job`.
 
 Sorting is explicit:
 
@@ -82,7 +83,7 @@ upwork job '~0123456789'
 upwork job 'https://www.upwork.com/jobs/~0123456789'
 ```
 
-The result contains the opening, qualifications, screening questions, client history, bid statistics, related jobs, and account-specific application state.
+The result contains `requiredConnects`, the opening, qualifications, screening questions, client history, bid statistics, related jobs, and account-specific application state.
 
 ## Filters
 
@@ -95,6 +96,7 @@ Run `upwork find --help` for the accepted values.
 | `--include-unverified` | Opt out of the verified-client default                       |
 | `--proposals`          | Select an Upwork proposal-count range                        |
 | `--max-proposals`      | Apply an exact client-side proposal cap                      |
+| `--max-connects`       | Apply an exact client-side required Connects cap             |
 | `--max-results`        | Limit compact jobs returned after deduplication              |
 | `--experience`         | Select entry, intermediate, or expert work                   |
 | `--job-type`           | Select hourly or fixed-price work                            |
