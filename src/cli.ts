@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
-import { BunRuntime, BunServices } from "@effect/platform-bun";
+import { BunRuntime, BunServices, BunSocket } from "@effect/platform-bun";
 import { Array, Clock, Console, Effect, Layer, Option, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
 import { FetchHttpClient } from "effect/unstable/http";
+import packageJson from "../package.json" with { type: "json" };
 import { captureAuth, CliError, loginAuth } from "./auth.ts";
 import {
   getJob,
@@ -39,10 +40,28 @@ const loginCommand = Command.make(
     cdp: cdpFlag,
     timeoutMinutes: authTimeoutFlag,
   },
-  ({ cdp, timeoutMinutes }) => loginAuth(cdp, timeoutMinutes).pipe(Effect.flatMap(printJson)),
+  ({ cdp, timeoutMinutes }) =>
+    Effect.gen(function* () {
+      const result = yield* loginAuth(cdp, timeoutMinutes);
+      if (result.wasAlreadyAuthenticated) {
+        yield* Console.log("Already authenticated with Upwork.");
+      } else {
+        yield* Console.log("Authenticated with Upwork.");
+        if (result.browserClosed) {
+          yield* Console.log("Chrome closed.");
+        } else {
+          yield* Console.log("Chrome could not be closed automatically. You can close it now.");
+        }
+      }
+      yield* Console.log(`Session saved to ${result.path}.`);
+    }),
 ).pipe(Command.withDescription("Open Chrome and wait for Upwork authentication"));
 const captureCommand = Command.make("capture", { cdp: cdpFlag }, ({ cdp }) =>
-  captureAuth(cdp).pipe(Effect.flatMap(printJson)),
+  Effect.gen(function* () {
+    const result = yield* captureAuth(cdp);
+    yield* Console.log("Authentication captured.");
+    yield* Console.log(`Session saved to ${result.path}.`);
+  }),
 ).pipe(Command.withDescription("Capture authenticated Upwork state from Chrome"));
 
 const authCommand = Command.make("auth").pipe(
@@ -328,6 +347,13 @@ const app = Command.make("upwork").pipe(
   Command.withSubcommands([authCommand, jobCommand, findCommand]),
 );
 
-const mainLayer = Layer.merge(BunServices.layer, FetchHttpClient.layer);
+const mainLayer = Layer.mergeAll(
+  BunServices.layer,
+  FetchHttpClient.layer,
+  BunSocket.layerWebSocketConstructor,
+);
 
-Command.run(app, { version: "0.2.0" }).pipe(Effect.provide(mainLayer), BunRuntime.runMain);
+Command.run(app, { version: packageJson.version }).pipe(
+  Effect.provide(mainLayer),
+  BunRuntime.runMain,
+);

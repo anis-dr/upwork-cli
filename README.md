@@ -29,7 +29,7 @@ Run:
 upwork auth login
 ```
 
-The CLI launches a dedicated Chrome profile on macOS, Windows, or Linux and opens Upwork. Log in and complete any CAPTCHA in that window. The CLI waits for the authenticated session, captures it, secures the state file, and exits.
+The CLI launches a dedicated Chrome profile on macOS, Windows, or Linux and opens Upwork. Log in and complete any CAPTCHA in that window. The CLI validates the authenticated session, secures the state file, closes the Chrome instance it launched, and reports success.
 
 The default CDP port is `9222`, and the default timeout is 10 minutes:
 
@@ -38,6 +38,8 @@ upwork auth login --cdp 9333 --timeout-minutes 15
 ```
 
 If Chrome is already running with CDP enabled, the CLI reuses it. `upwork auth capture --cdp 9222` remains available as a manual fallback.
+
+Authentication commands print short status messages for people. `find` and `job` return JSON for agents.
 
 The CLI stores the state at `~/.config/upwork-cli/state.json` with `0600` permissions. Do not print, share, or commit this file. Find and job-detail commands use direct HTTP requests after authentication.
 
