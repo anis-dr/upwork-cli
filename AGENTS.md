@@ -28,7 +28,7 @@ The Effect v4 source is available at `~/.local/share/effect-solutions/effect`.
 
 ### Upwork CLI
 
-When searching or filtering Upwork jobs, finding matching work, or inspecting a job ID or URL, read `skills/upwork-cli/SKILL.md` before running the CLI.
+When searching or filtering Upwork jobs, finding matching work, or inspecting a job reference or URL, read `skills/upwork-cli/SKILL.md` before running the CLI.
 
 ### Issue tracker
 

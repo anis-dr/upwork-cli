@@ -64,7 +64,7 @@ upwork find \
 
 One failed query does not discard successful queries. Each `queries` entry reports `status: "ok"` with paging metadata or `status: "error"` with the query error.
 
-Compact results omit job descriptions and include the queries that matched each job. Use `upwork job <id-or-url>` for complete details.
+Compact results omit job descriptions and include `matchedQueries`. `searchResultId` identifies the discovery result for deduplication; `jobReference` is the value accepted by `upwork job`.
 
 Sorting is explicit:
 
@@ -75,7 +75,7 @@ Date filtering requires recency sorting. The response reports paging and scanned
 
 ## Read a job
 
-Pass a ciphertext, bare ID, or full Upwork URL:
+Pass a job reference beginning with `~` or a full Upwork URL:
 
 ```bash
 upwork job '~0123456789'
@@ -145,6 +145,18 @@ bun run changeset
 The repository uses the published `oxlint-plugin-effect` package and a reviewed copy of `anti-slop` under `tools/oxlint/anti-slop/`.
 
 Any change to commands, flags, defaults, output, authentication, or installation behavior must update both `README.md` and `skills/upwork-cli/SKILL.md` in the same pull request.
+
+### Local telemetry
+
+The CLI exports Effect traces and logs when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Use motel for local debugging:
+
+```bash
+motel start
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:27686 bun run src/cli.ts find "TypeScript"
+motel
+```
+
+Telemetry uses the `upwork-cli` service name and the installed package version. Local motel data under `.motel-data/` is ignored by Git.
 
 ## Trunk workflow
 

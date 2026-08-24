@@ -107,12 +107,12 @@ const closeChromeBrowser = Effect.fnUntraced(function* (cdpPort: number) {
 
 const decodeBrowserState = Schema.decodeUnknownEffect(Schema.fromJsonString(BrowserState));
 
-export class CliError extends Schema.TaggedError<CliError>()("CliError", {
+export class UpworkCliError extends Schema.TaggedError<UpworkCliError>()("UpworkCliError", {
   message: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-export interface AuthState {
+export interface AuthenticatedSession {
   readonly bearerToken: string;
   readonly tenantId: string;
   readonly cookieHeader: string;
@@ -123,20 +123,20 @@ export interface AuthState {
 const userHome = Config.string("HOME").pipe(
   Config.orElse(() => Config.string("USERPROFILE")),
   Effect.mapError(
-    (cause) => new CliError({ message: "User home directory is not configured", cause }),
+    (cause) => new UpworkCliError({ message: "User home directory is not configured", cause }),
   ),
 );
 
-export interface ChromeLaunchSpec {
+export interface ChromeLaunchCommand {
   readonly executable: string;
   readonly args: ReadonlyArray<string>;
 }
 
-export const chromeLaunchSpecs = (
+export const chromeLaunchCommands = (
   cdpPort: number,
   profilePath: string,
   url: string,
-): readonly [ChromeLaunchSpec, ...ReadonlyArray<ChromeLaunchSpec>] => {
+): readonly [ChromeLaunchCommand, ...ReadonlyArray<ChromeLaunchCommand>] => {
   const chromeArgs = [`--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profilePath}`, url];
   return [
     {
@@ -154,20 +154,20 @@ export const chromeLaunchSpecs = (
   ];
 };
 
-export const authStatePath = Effect.fn("Auth.statePath")(function* () {
+export const sessionStatePath = Effect.fn("Authentication.statePath")(function* () {
   const home = yield* userHome;
   return yield* Config.string("UPWORK_CLI_STATE").pipe(
     Config.withDefault(`${home}/.config/upwork-cli/state.json`),
   );
 });
 
-export const loadAuth = Effect.fn("Auth.load")(function* () {
+export const loadAuthenticatedSession = Effect.fn("Authentication.loadSession")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* authStatePath();
+  const path = yield* sessionStatePath();
   const contents = yield* fileSystem.readFileString(path).pipe(
     Effect.mapError(
       (cause) =>
-        new CliError({
+        new UpworkCliError({
           message: `No Upwork auth state at ${path}. Run: upwork auth login`,
           cause,
         }),
@@ -175,14 +175,14 @@ export const loadAuth = Effect.fn("Auth.load")(function* () {
   );
   const state = yield* decodeBrowserState(contents).pipe(
     Effect.mapError(
-      (cause) => new CliError({ message: `Invalid browser state at ${path}`, cause }),
+      (cause) => new UpworkCliError({ message: `Invalid browser state at ${path}`, cause }),
     ),
   );
   const tenantId = Option.fromNullishOr(
     state.cookies.find((cookie) => cookie.name === "current_organization_uid")?.value,
   );
   if (Option.isNone(tenantId)) {
-    return yield* new CliError({
+    return yield* new UpworkCliError({
       message: "The captured browser state has no Upwork organization",
     });
   }
@@ -208,7 +208,7 @@ export const loadAuth = Effect.fn("Auth.load")(function* () {
     }
   }
   if (Option.isNone(bearerToken)) {
-    return yield* new CliError({
+    return yield* new UpworkCliError({
       message: "The captured browser state has no valid Upwork session",
     });
   }
@@ -224,20 +224,23 @@ export const loadAuth = Effect.fn("Auth.load")(function* () {
     cookieHeader,
     cookieCount: state.cookies.length,
     path,
-  } satisfies AuthState;
+  } satisfies AuthenticatedSession;
 });
 
-export const captureAuth = Effect.fn("Auth.capture")(function* (cdpPort: number) {
+export const captureAuthenticatedSession = Effect.fn("Authentication.captureSession")(function* (
+  cdpPort: number,
+) {
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const path = yield* authStatePath();
+  const path = yield* sessionStatePath();
 
   yield* fileSystem
     .makeDirectory(pathService.dirname(path), { recursive: true })
     .pipe(
       Effect.mapError(
-        (cause) => new CliError({ message: `Cannot create ${pathService.dirname(path)}`, cause }),
+        (cause) =>
+          new UpworkCliError({ message: `Cannot create ${pathService.dirname(path)}`, cause }),
       ),
     );
 
@@ -256,7 +259,7 @@ export const captureAuth = Effect.fn("Auth.capture")(function* (cdpPort: number)
     .pipe(
       Effect.mapError(
         (cause) =>
-          new CliError({
+          new UpworkCliError({
             message: `Could not capture Chrome state from CDP port ${cdpPort}`,
             cause,
           }),
@@ -265,23 +268,27 @@ export const captureAuth = Effect.fn("Auth.capture")(function* (cdpPort: number)
 
   yield* fileSystem
     .chmod(path, 0o600)
-    .pipe(Effect.mapError((cause) => new CliError({ message: `Cannot secure ${path}`, cause })));
+    .pipe(
+      Effect.mapError((cause) => new UpworkCliError({ message: `Cannot secure ${path}`, cause })),
+    );
 
-  const auth = yield* loadAuth();
-  return { path: auth.path, cookies: auth.cookieCount };
+  const session = yield* loadAuthenticatedSession();
+  return { path: session.path, cookies: session.cookieCount };
 });
 
 const UPWORK_LOGIN_URL = "https://www.upwork.com/nx/find-work/";
 
-export const loginAuth = Effect.fn("Auth.login")(function* (
+export const authenticate = Effect.fn("Authentication.login")(function* (
   cdpPort: number,
   timeoutMinutes: number,
 ) {
   if (timeoutMinutes < 1) {
-    return yield* new CliError({ message: "Authentication timeout must be at least one minute" });
+    return yield* new UpworkCliError({
+      message: "Authentication timeout must be at least one minute",
+    });
   }
 
-  const existingAuth = yield* captureAuth(cdpPort).pipe(Effect.option);
+  const existingAuth = yield* captureAuthenticatedSession(cdpPort).pipe(Effect.option);
   if (Option.isSome(existingAuth)) {
     return {
       ...existingAuth.value,
@@ -294,7 +301,7 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   yield* spawner.string(ChildProcess.make("agent-browser", ["--version"])).pipe(
     Effect.mapError(
       (cause) =>
-        new CliError({
+        new UpworkCliError({
           message: "agent-browser is required for Upwork authentication",
           cause,
         }),
@@ -302,7 +309,7 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   );
 
   const home = yield* userHome;
-  const specs = chromeLaunchSpecs(cdpPort, `${home}/.upwork-cli-chrome`, UPWORK_LOGIN_URL);
+  const specs = chromeLaunchCommands(cdpPort, `${home}/.upwork-cli-chrome`, UPWORK_LOGIN_URL);
   const [first, ...rest] = specs;
   let launch = spawner.string(ChildProcess.make(first.executable, first.args));
   for (const spec of rest) {
@@ -316,7 +323,7 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   yield* launch.pipe(
     Effect.mapError(
       (cause) =>
-        new CliError({
+        new UpworkCliError({
           message: "Could not find or launch Google Chrome",
           cause,
         }),
@@ -326,7 +333,7 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   yield* Console.log("Chrome is ready. Log in to Upwork in the opened window.");
   yield* Console.log(`Waiting up to ${timeoutMinutes} minutes for authentication...`);
 
-  const auth = yield* captureAuth(cdpPort).pipe(
+  const session = yield* captureAuthenticatedSession(cdpPort).pipe(
     Effect.retry({
       schedule: Schedule.spaced("2 seconds"),
       times: timeoutMinutes * 30,
@@ -335,7 +342,7 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
       duration: `${timeoutMinutes} minutes`,
       orElse: () =>
         Effect.fail(
-          new CliError({
+          new UpworkCliError({
             message: "Timed out waiting for Upwork authentication",
           }),
         ),
@@ -344,12 +351,12 @@ export const loginAuth = Effect.fn("Auth.login")(function* (
   const browserClosed = yield* closeChromeBrowser(cdpPort).pipe(
     Effect.timeoutOrElse({
       duration: "5 seconds",
-      orElse: () => Effect.fail(new CliError({ message: "Chrome close timed out" })),
+      orElse: () => Effect.fail(new UpworkCliError({ message: "Chrome close timed out" })),
     }),
     Effect.option,
   );
   return {
-    ...auth,
+    ...session,
     wasAlreadyAuthenticated: false,
     browserClosed: Option.isSome(browserClosed),
   };

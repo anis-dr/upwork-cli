@@ -12,7 +12,7 @@ import {
   Schema,
 } from "effect";
 import { HttpClient, HttpServerResponse } from "effect/unstable/http";
-import { searchJobs } from "../src/upwork.ts";
+import { findJobsForQuery } from "../src/upwork.ts";
 
 const CapturedRequest = Schema.Struct({
   query: Schema.String,
@@ -52,11 +52,20 @@ class SearchTestHarness extends Context.Service<
   }
 >()("upwork-cli/test/SearchTestHarness") {}
 
-const makeJob = (id: string, publishedAt: string, country: Option.Option<string>) => ({
+const clientSpend = Option.some({ isoCurrencyCode: "USD", amount: "1000" });
+
+const makeJob = (
+  id: string,
+  publishedAt: string,
+  country: Option.Option<string>,
+  totalSpent: Option.Option<{ isoCurrencyCode: string; amount: string }>,
+  applied: Option.Option<boolean>,
+  totalApplicants: Option.Option<number> = Option.some(4),
+) => ({
   id,
   title: `Job ${id}`,
   description: `Description ${id}`,
-  applied: false,
+  applied: Option.getOrNull(applied),
   ontologySkills: [{ uid: "skill-1", prefLabel: "TypeScript" }],
   upworkHistoryData: {
     client: {
@@ -64,7 +73,7 @@ const makeJob = (id: string, publishedAt: string, country: Option.Option<string>
       country: Option.getOrNull(country),
       totalReviews: 10,
       totalFeedback: 5,
-      totalSpent: { isoCurrencyCode: "USD", amount: "1000" },
+      totalSpent: Option.getOrNull(totalSpent),
     },
   },
   jobTile: {
@@ -75,7 +84,7 @@ const makeJob = (id: string, publishedAt: string, country: Option.Option<string>
       hourlyBudgetMax: "100",
       contractorTier: "ExpertLevel",
       publishTime: publishedAt,
-      totalApplicants: 4,
+      totalApplicants: Option.getOrNull(totalApplicants),
       fixedPriceAmount: { isoCurrencyCode: "USD", amount: "1000" },
     },
   },
@@ -155,7 +164,7 @@ it.layer(filterLayer)("search request filters", (it) => {
   it.effect("encodes practical filters into the Upwork GraphQL request", () =>
     Effect.gen(function* () {
       const harness = yield* SearchTestHarness;
-      yield* searchJobs({
+      yield* findJobsForQuery({
         query: "TypeScript",
         page: 2,
         limit: 10,
@@ -197,16 +206,16 @@ it.layer(filterLayer)("search request filters", (it) => {
 const recencyLayer = searchTestLayer([
   makeResponse(
     [
-      makeJob("1", "2026-08-23T00:00:00.000Z", Option.some("US")),
-      makeJob("2", "2026-08-22T12:00:00.000Z", Option.some("US")),
+      makeJob("1", "2026-08-23T00:00:00.000Z", Option.some("US"), clientSpend, Option.some(false)),
+      makeJob("2", "2026-08-22T12:00:00.000Z", Option.some("US"), clientSpend, Option.some(false)),
     ],
     0,
     4,
   ),
   makeResponse(
     [
-      makeJob("3", "2026-08-22T01:00:00.000Z", Option.some("US")),
-      makeJob("4", "2026-08-21T23:59:59.000Z", Option.some("US")),
+      makeJob("3", "2026-08-22T01:00:00.000Z", Option.some("US"), clientSpend, Option.some(false)),
+      makeJob("4", "2026-08-21T23:59:59.000Z", Option.some("US"), clientSpend, Option.some(false)),
     ],
     2,
     4,
@@ -218,7 +227,7 @@ it.layer(recencyLayer)("search recency pagination", (it) => {
     Effect.gen(function* () {
       const harness = yield* SearchTestHarness;
       const cutoff = DateTime.toEpochMillis(DateTime.makeUnsafe("2026-08-22T00:00:00.000Z"));
-      const result = yield* searchJobs({
+      const result = yield* findJobsForQuery({
         query: "TypeScript",
         page: 1,
         limit: 2,
@@ -253,13 +262,25 @@ it.layer(recencyLayer)("search recency pagination", (it) => {
 });
 
 const nullableCountryLayer = searchTestLayer([
-  makeResponse([makeJob("nullable-country", "2026-08-23T00:00:00.000Z", Option.none())], 0, 1),
+  makeResponse(
+    [
+      makeJob(
+        "nullable-country",
+        "2026-08-23T00:00:00.000Z",
+        Option.none(),
+        clientSpend,
+        Option.some(false),
+      ),
+    ],
+    0,
+    1,
+  ),
 ]);
 
 it.layer(nullableCountryLayer)("nullable search fields", (it) => {
   it.effect("accepts a client without a country", () =>
     Effect.gen(function* () {
-      const result = yield* searchJobs({
+      const result = yield* findJobsForQuery({
         query: "TypeScript",
         page: 1,
         limit: 1,
@@ -281,6 +302,142 @@ it.layer(nullableCountryLayer)("nullable search fields", (it) => {
       );
 
       expect(Option.isNone(Option.fromNullishOr(job.client.country))).toBe(true);
+    }),
+  );
+});
+
+const nullableSpendLayer = searchTestLayer([
+  makeResponse(
+    [
+      makeJob(
+        "nullable-spend",
+        "2026-08-23T00:00:00.000Z",
+        Option.some("US"),
+        Option.none(),
+        Option.some(false),
+      ),
+    ],
+    0,
+    1,
+  ),
+]);
+
+it.layer(nullableSpendLayer)("nullable client spend", (it) => {
+  it.effect("accepts a client without recorded spend", () =>
+    Effect.gen(function* () {
+      const result = yield* findJobsForQuery({
+        query: "TypeScript",
+        page: 1,
+        limit: 1,
+        sort: "relevance",
+        verified: true,
+        proposals: Option.none(),
+        experience: Option.none(),
+        jobType: Option.none(),
+        budget: Option.none(),
+        clientHires: Option.none(),
+        duration: Option.none(),
+        workload: Option.none(),
+        contractToHire: false,
+        postedAfter: Option.none(),
+        maxPages: 1,
+      });
+      const job = yield* Array.get(result.jobs, 0).pipe(
+        Effect.fromOption(() => "Missing nullable-spend job"),
+      );
+
+      expect(Option.isNone(Option.fromNullishOr(job.client.totalSpent))).toBe(true);
+    }),
+  );
+});
+
+const nullableAppliedLayer = searchTestLayer([
+  makeResponse(
+    [
+      makeJob(
+        "nullable-applied",
+        "2026-08-23T00:00:00.000Z",
+        Option.some("US"),
+        clientSpend,
+        Option.none(),
+      ),
+    ],
+    0,
+    1,
+  ),
+]);
+
+it.layer(nullableAppliedLayer)("nullable application state", (it) => {
+  it.effect("accepts a job without application state", () =>
+    Effect.gen(function* () {
+      const result = yield* findJobsForQuery({
+        query: "TypeScript",
+        page: 1,
+        limit: 1,
+        sort: "relevance",
+        verified: true,
+        proposals: Option.none(),
+        experience: Option.none(),
+        jobType: Option.none(),
+        budget: Option.none(),
+        clientHires: Option.none(),
+        duration: Option.none(),
+        workload: Option.none(),
+        contractToHire: false,
+        postedAfter: Option.none(),
+        maxPages: 1,
+      });
+      const job = yield* Array.get(result.jobs, 0).pipe(
+        Effect.fromOption(() => "Missing nullable-applied job"),
+      );
+
+      expect(Option.isNone(Option.fromNullishOr(job.applied))).toBe(true);
+    }),
+  );
+});
+
+const nullableApplicantsLayer = searchTestLayer([
+  makeResponse(
+    [
+      makeJob(
+        "nullable-applicants",
+        "2026-08-23T00:00:00.000Z",
+        Option.some("US"),
+        clientSpend,
+        Option.some(false),
+        Option.none(),
+      ),
+    ],
+    0,
+    1,
+  ),
+]);
+
+it.layer(nullableApplicantsLayer)("nullable applicant count", (it) => {
+  it.effect("accepts a job without an applicant count", () =>
+    Effect.gen(function* () {
+      const result = yield* findJobsForQuery({
+        query: "Flutter",
+        page: 1,
+        limit: 1,
+        sort: "relevance",
+        verified: true,
+        proposals: Option.none(),
+        experience: Option.none(),
+        jobType: Option.none(),
+        budget: Option.none(),
+        clientHires: Option.none(),
+        duration: Option.none(),
+        workload: Option.none(),
+        contractToHire: false,
+        postedAfter: Option.none(),
+        maxPages: 1,
+      });
+      const job = yield* Array.get(result.jobs, 0).pipe(
+        Effect.fromOption(() => "Missing nullable-applicants job"),
+      );
+
+      expect(Option.isNone(job.proposals)).toBe(true);
     }),
   );
 });

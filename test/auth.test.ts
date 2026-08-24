@@ -1,8 +1,8 @@
 import { expect, it } from "@effect/vitest";
-import { chromeLaunchSpecs } from "../src/auth.ts";
+import { chromeLaunchCommands } from "../src/auth.ts";
 
 it("builds Chrome launch commands for macOS, Windows, and Linux", () => {
-  const specs = chromeLaunchSpecs(9333, "/home/user/.upwork-cli-chrome", "https://upwork.test");
+  const specs = chromeLaunchCommands(9333, "/home/user/.upwork-cli-chrome", "https://upwork.test");
 
   expect({
     executables: specs.map((spec) => spec.executable),

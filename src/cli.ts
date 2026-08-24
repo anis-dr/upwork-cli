@@ -1,20 +1,21 @@
 #!/usr/bin/env bun
 import { BunRuntime, BunServices, BunSocket } from "@effect/platform-bun";
-import { Array, Clock, Console, Effect, Layer, Option, Result, Schema } from "effect";
+import { Array, Clock, Config, Console, Effect, Layer, Option, Result, Schema } from "effect";
 import { Argument, Command, Flag } from "effect/unstable/cli";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient, Headers } from "effect/unstable/http";
+import { OtlpLogger, OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import packageJson from "../package.json" with { type: "json" };
-import { captureAuth, CliError, loginAuth } from "./auth.ts";
+import { captureAuthenticatedSession, UpworkCliError, authenticate } from "./auth.ts";
 import {
-  getJob,
-  searchJobs,
+  getJobDetails,
+  findJobsForQuery,
   type BudgetRange,
   type ClientHires,
   type ExperienceLevel,
   type JobType,
   type ProjectDuration,
   type ProposalRange,
-  type SearchOptions,
+  type JobQuery,
   type Workload,
 } from "./upwork.ts";
 
@@ -22,7 +23,9 @@ const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unkno
 
 const printJson = <A>(value: A) =>
   encodeJson(value).pipe(
-    Effect.mapError((cause) => new CliError({ message: "Could not encode CLI output", cause })),
+    Effect.mapError(
+      (cause) => new UpworkCliError({ message: "Could not encode CLI output", cause }),
+    ),
     Effect.flatMap(Console.log),
   );
 
@@ -42,25 +45,25 @@ const loginCommand = Command.make(
   },
   ({ cdp, timeoutMinutes }) =>
     Effect.gen(function* () {
-      const result = yield* loginAuth(cdp, timeoutMinutes);
-      if (result.wasAlreadyAuthenticated) {
+      const session = yield* authenticate(cdp, timeoutMinutes);
+      if (session.wasAlreadyAuthenticated) {
         yield* Console.log("Already authenticated with Upwork.");
       } else {
         yield* Console.log("Authenticated with Upwork.");
-        if (result.browserClosed) {
+        if (session.browserClosed) {
           yield* Console.log("Chrome closed.");
         } else {
           yield* Console.log("Chrome could not be closed automatically. You can close it now.");
         }
       }
-      yield* Console.log(`Session saved to ${result.path}.`);
+      yield* Console.log(`Session saved to ${session.path}.`);
     }),
 ).pipe(Command.withDescription("Open Chrome and wait for Upwork authentication"));
 const captureCommand = Command.make("capture", { cdp: cdpFlag }, ({ cdp }) =>
   Effect.gen(function* () {
-    const result = yield* captureAuth(cdp);
+    const session = yield* captureAuthenticatedSession(cdp);
     yield* Console.log("Authentication captured.");
-    yield* Console.log(`Session saved to ${result.path}.`);
+    yield* Console.log(`Session saved to ${session.path}.`);
   }),
 ).pipe(Command.withDescription("Capture authenticated Upwork state from Chrome"));
 
@@ -133,7 +136,7 @@ const POSTED_WITHIN_MILLIS = {
 
 type PostedWithin = "any" | keyof typeof POSTED_WITHIN_MILLIS;
 
-interface CliSearchFilters {
+interface FindFilters {
   readonly proposals: "any" | ProposalRange;
   readonly experience: "any" | ExperienceLevel;
   readonly jobType: "any" | JobType;
@@ -143,13 +146,13 @@ interface CliSearchFilters {
   readonly workload: "any" | Workload;
 }
 
-const getPostedAfter = Effect.fnUntraced(function* (postedWithin: PostedWithin) {
+const resolvePostedAfter = Effect.fnUntraced(function* (postedWithin: PostedWithin) {
   if (postedWithin === "any") return Option.none<number>();
   const now = yield* Clock.currentTimeMillis;
   return Option.some(now - POSTED_WITHIN_MILLIS[postedWithin]);
 });
 
-const applySearchFilters = (base: SearchOptions, filters: CliSearchFilters): SearchOptions => {
+const applyFindFilters = (base: JobQuery, filters: FindFilters): JobQuery => {
   let configured = base;
   if (filters.proposals !== "any") {
     configured = { ...configured, proposals: Option.some(filters.proposals) };
@@ -179,19 +182,19 @@ const applySearchFilters = (base: SearchOptions, filters: CliSearchFilters): Sea
 };
 
 const jobInput = Argument.string("job").pipe(
-  Argument.withDescription("Upwork job URL, ciphertext, or ID"),
+  Argument.withDescription("Upwork job reference or URL"),
 );
 const jobCommand = Command.make("job", { job: jobInput }, ({ job }) =>
   Effect.gen(function* () {
-    const result = yield* getJob(job);
+    const jobDetails = yield* getJobDetails(job);
     return yield* printJson({
       meta: { cliVersion: packageJson.version },
-      ...result,
+      ...jobDetails,
     });
   }),
 ).pipe(Command.withDescription("Return complete data for one Upwork job"));
 
-const findQueries = Argument.string("query").pipe(
+const queryArguments = Argument.string("query").pipe(
   Argument.variadic({ min: 1 }),
   Argument.withDescription("Queries to combine"),
 );
@@ -212,34 +215,36 @@ const includeUnverifiedFlag = Flag.boolean("include-unverified").pipe(
   Flag.withDescription("Include clients without verified payment"),
 );
 
-interface FindJob {
+interface MergeableJob {
   readonly id: string;
-  readonly proposals: number;
+  readonly proposals: Option.Option<number>;
   readonly publishedAt: string;
 }
 
-interface FindQueryJobs<Job extends FindJob> {
+interface QueryJobList<Job extends MergeableJob> {
   readonly query: string;
   readonly jobs: ReadonlyArray<Job>;
 }
 
-const mergeFindJobLists = <Job extends FindJob>(
-  queryResults: ReadonlyArray<FindQueryJobs<Job>>,
+const mergeQueryJobLists = <Job extends MergeableJob>(
+  queryResults: ReadonlyArray<QueryJobList<Job>>,
   sort: "relevance" | "recency",
   maxProposals: number,
 ): Array<Job & { readonly matchedQueries: ReadonlyArray<string> }> => {
   const seen = new Set<string>();
   const matchedQueriesById = new Map<string, Array<string>>();
   const jobs: Array<Job> = [];
+  const isEligible = (job: Job) =>
+    Option.exists(job.proposals, (proposals) => proposals <= maxProposals);
   const addJob = (job: Job) => {
-    if (seen.has(job.id) || job.proposals > maxProposals) return;
+    if (seen.has(job.id) || !isEligible(job)) return;
     seen.add(job.id);
     jobs.push(job);
   };
 
   for (const result of queryResults) {
     for (const job of result.jobs) {
-      if (job.proposals > maxProposals) continue;
+      if (!isEligible(job)) continue;
       const matchedQueries = Option.fromNullishOr(matchedQueriesById.get(job.id));
       if (Option.isSome(matchedQueries)) {
         if (!matchedQueries.value.includes(result.query)) matchedQueries.value.push(result.query);
@@ -281,7 +286,7 @@ const mergeFindJobLists = <Job extends FindJob>(
 const findCommand = Command.make(
   "find",
   {
-    queries: findQueries,
+    queries: queryArguments,
     maxProposals: maxProposalsFlag,
     pageSize: pageSizeFlag,
     maxResults: maxResultsFlag,
@@ -301,27 +306,27 @@ const findCommand = Command.make(
   (config) =>
     Effect.gen(function* () {
       if (config.maxProposals < 0) {
-        return yield* new CliError({
+        return yield* new UpworkCliError({
           message: "Maximum proposals cannot be negative",
         });
       }
       if (config.maxResults < 1) {
-        return yield* new CliError({
+        return yield* new UpworkCliError({
           message: "Maximum results must be at least 1",
         });
       }
       if (config.postedWithin !== "any" && config.sort === "relevance") {
-        return yield* new CliError({
+        return yield* new UpworkCliError({
           message: "--posted-within requires --sort recency",
         });
       }
 
-      const postedAfter = yield* getPostedAfter(config.postedWithin);
-      const selectedQueries = config.queries;
-      const outcomes = yield* Effect.forEach(
-        selectedQueries,
+      const postedAfter = yield* resolvePostedAfter(config.postedWithin);
+      const jobQueries = config.queries;
+      const queryResults = yield* Effect.forEach(
+        jobQueries,
         (query) => {
-          const options = applySearchFilters(
+          const jobQuery = applyFindFilters(
             {
               query,
               page: 1,
@@ -341,48 +346,51 @@ const findCommand = Command.make(
             },
             config,
           );
-          return searchJobs(options).pipe(Effect.result);
+          return findJobsForQuery(jobQuery).pipe(
+            Effect.annotateSpans({ "upwork.query": query }),
+            Effect.result,
+          );
         },
         { concurrency: 2 },
       );
-      const queryOutcomes = Array.zip(selectedQueries, outcomes);
-      const successful = queryOutcomes.flatMap(([query, outcome]) => {
-        if (Result.isFailure(outcome)) return [];
-        return [{ query, response: outcome.success }];
+      const pairedResults = Array.zip(jobQueries, queryResults);
+      const successfulQueries = pairedResults.flatMap(([query, result]) => {
+        if (Result.isFailure(result)) return [];
+        return [{ query, response: result.success }];
       });
-      const queryMetadata = queryOutcomes.map(([query, outcome]) => {
-        if (Result.isFailure(outcome)) {
+      const queryOutcomes = pairedResults.map(([query, result]) => {
+        if (Result.isFailure(result)) {
           return {
             query,
             status: "error",
-            error: outcome.failure.message,
+            error: result.failure.message,
           };
         }
         return {
           query,
           status: "ok",
-          paging: outcome.success.paging,
-          scannedPages: outcome.success.scannedPages,
+          paging: result.success.paging,
+          scannedPages: result.success.scannedPages,
         };
       });
-      if (successful.length === 0) {
-        const failures = queryOutcomes.flatMap(([query, outcome]) => {
-          if (Result.isSuccess(outcome)) return [];
-          return [`${query}: ${outcome.failure.message}`];
+      if (successfulQueries.length === 0) {
+        const failures = pairedResults.flatMap(([query, result]) => {
+          if (Result.isSuccess(result)) return [];
+          return [`${query}: ${result.failure.message}`];
         });
-        return yield* new CliError({
+        return yield* new UpworkCliError({
           message: `upwork-cli ${packageJson.version}: all queries failed. ${failures.join("; ")}`,
         });
       }
 
-      const mergedJobs = mergeFindJobLists(
-        successful.map(({ query, response }) => ({ query, jobs: response.jobs })),
+      const mergedJobs = mergeQueryJobLists(
+        successfulQueries.map(({ query, response }) => ({ query, jobs: response.jobs })),
         config.sort,
         config.maxProposals,
       );
-      const jobs = mergedJobs.slice(0, config.maxResults).map((job) => ({
-        id: job.id,
-        ciphertext: job.ciphertext,
+      const jobSummaries = mergedJobs.slice(0, config.maxResults).map((job) => ({
+        searchResultId: job.id,
+        jobReference: job.jobReference,
         url: job.url,
         title: job.title,
         skills: job.skills.map((skill) => skill.name),
@@ -391,7 +399,7 @@ const findCommand = Command.make(
         fixedPriceBudget: job.fixedPriceBudget,
         experienceLevel: job.experienceLevel,
         publishedAt: job.publishedAt,
-        proposals: job.proposals,
+        proposals: Option.getOrNull(job.proposals),
         applied: job.applied,
         client: job.client,
         matchedQueries: job.matchedQueries,
@@ -402,7 +410,7 @@ const findCommand = Command.make(
           cliVersion: packageJson.version,
         },
         contentTrust: "untrusted",
-        queries: queryMetadata,
+        queries: queryOutcomes,
         filters: {
           paymentVerified: !config.includeUnverified,
           maxProposals: config.maxProposals,
@@ -419,8 +427,11 @@ const findCommand = Command.make(
           contractToHire: config.contractToHire,
           postedWithin: config.postedWithin,
         },
-        scannedPages: successful.reduce((total, { response }) => total + response.scannedPages, 0),
-        jobs,
+        scannedPages: successfulQueries.reduce(
+          (total, { response }) => total + response.scannedPages,
+          0,
+        ),
+        jobs: jobSummaries,
       });
     }),
 ).pipe(Command.withDescription("Combine, deduplicate, and filter job searches"));
@@ -430,10 +441,46 @@ const app = Command.make("upwork").pipe(
   Command.withSubcommands([authCommand, jobCommand, findCommand]),
 );
 
+const observabilityLayer = Layer.unwrap(
+  Effect.gen(function* () {
+    const configuredEndpoint = yield* Config.option(Config.string("OTEL_EXPORTER_OTLP_ENDPOINT"));
+    if (Option.isNone(configuredEndpoint)) return Layer.empty;
+
+    let endpoint = configuredEndpoint.value;
+    if (endpoint.endsWith("/")) endpoint = endpoint.slice(0, -1);
+    const resource = {
+      serviceName: "upwork-cli",
+      serviceVersion: packageJson.version,
+    };
+    return Layer.merge(
+      OtlpTracer.layer({
+        url: `${endpoint}/v1/traces`,
+        resource,
+        exportInterval: "100 millis",
+        shutdownTimeout: "2 seconds",
+      }),
+      OtlpLogger.layer({
+        url: `${endpoint}/v1/logs`,
+        resource,
+        mergeWithExisting: false,
+        shutdownTimeout: "2 seconds",
+      }),
+    ).pipe(Layer.provide(OtlpSerialization.layerJson), Layer.provide(FetchHttpClient.layer));
+  }),
+);
+
 const mainLayer = Layer.mergeAll(
   BunServices.layer,
   FetchHttpClient.layer,
   BunSocket.layerWebSocketConstructor,
+  observabilityLayer,
+  Layer.succeed(Headers.CurrentRedactedNames, [
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-upwork-api-tenantid",
+  ]),
 );
 
 Command.run(app, { version: packageJson.version }).pipe(
