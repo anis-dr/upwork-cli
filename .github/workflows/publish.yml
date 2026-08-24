@@ -1,29 +1,32 @@
-name: Publish
+name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: npm-publish
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish npm package
+  release:
+    name: Version or publish package
+    if: github.repository == 'anis-dr/upwork-cli'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: npm
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
-      - name: Check out tagged commit
-        uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -36,17 +39,18 @@ jobs:
       - name: Patch Effect tooling
         run: bun run setup
 
-      - name: Verify tag and main branch
-        shell: bash
-        run: |
-          package_version="$(bun pm pkg get version | tr -d '"')"
-          test "$GITHUB_REF_NAME" = "v$package_version"
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-
       - name: Run quality gate
         run: bun run check
 
-      - name: Publish to npm
-        run: bun publish --access public
+      - name: Version or publish package
+        uses: changesets/action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          version-script: bun run version-packages
+          publish-script: bun run release
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
+          create-github-releases: true
+          push-git-tags: true
         env:
           NPM_CONFIG_TOKEN: ${{ secrets.NPM_TOKEN }}
