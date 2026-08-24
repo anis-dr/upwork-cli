@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.2.1
+
+### Patch Changes
+
+- 37e5e45: Publish the initial changelog and document the automated Changesets release workflow.
+
 ## 0.2.0
 
 ### Minor changes

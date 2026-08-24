@@ -1,6 +1,6 @@
 {
   "name": "upwork-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Read-only Upwork job search and inspection CLI for agents",
   "keywords": [
     "agents",
