@@ -1,6 +1,6 @@
 import { DateTime, Effect, Option, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
-import { CliError, loadAuth } from "./auth.ts";
+import { UpworkCliError, loadAuthenticatedSession } from "./auth.ts";
 
 const Money = Schema.Struct({
   isoCurrencyCode: Schema.NullOr(Schema.String),
@@ -12,7 +12,7 @@ const Skill = Schema.Struct({
   prefLabel: Schema.String,
 });
 
-const SearchResponse = Schema.Struct({
+const JobQueryResponse = Schema.Struct({
   data: Schema.Struct({
     search: Schema.Struct({
       universalSearchNuxt: Schema.Struct({
@@ -27,7 +27,7 @@ const SearchResponse = Schema.Struct({
               id: Schema.String,
               title: Schema.String,
               description: Schema.String,
-              applied: Schema.Boolean,
+              applied: Schema.NullOr(Schema.Boolean),
               ontologySkills: Schema.Array(Skill),
               upworkHistoryData: Schema.Struct({
                 client: Schema.Struct({
@@ -35,7 +35,7 @@ const SearchResponse = Schema.Struct({
                   country: Schema.NullOr(Schema.String),
                   totalReviews: Schema.Int,
                   totalFeedback: Schema.Finite,
-                  totalSpent: Money,
+                  totalSpent: Schema.NullOr(Money),
                 }),
               }),
               jobTile: Schema.Struct({
@@ -46,7 +46,7 @@ const SearchResponse = Schema.Struct({
                   hourlyBudgetMax: Schema.NullOr(Schema.String),
                   contractorTier: Schema.String,
                   publishTime: Schema.String,
-                  totalApplicants: Schema.Int,
+                  totalApplicants: Schema.NullOr(Schema.Int),
                   fixedPriceAmount: Schema.NullOr(Money),
                 }),
               }),
@@ -410,7 +410,7 @@ query JobAuthDetailsQuery(
   }
 }`;
 
-export type SearchSort = "relevance" | "recency";
+export type JobSort = "relevance" | "recency";
 export type ProposalRange = "0-4" | "5-9" | "10-14" | "15-19" | "20-49";
 export type ExperienceLevel = "entry" | "intermediate" | "expert";
 export type JobType = "hourly" | "fixed";
@@ -448,11 +448,11 @@ const WORKLOAD_API = {
   "as-needed": "as_needed",
 } satisfies Record<Workload, string>;
 
-export interface SearchOptions {
+export interface JobQuery {
   readonly query: string;
   readonly page: number;
   readonly limit: number;
-  readonly sort: SearchSort;
+  readonly sort: JobSort;
   readonly verified: boolean;
   readonly proposals: Option.Option<ProposalRange>;
   readonly experience: Option.Option<ExperienceLevel>;
@@ -485,9 +485,10 @@ interface UserJobSearchVariables {
   contractToHire?: true;
 }
 
-const requestError = (message: string) => (cause: unknown) => new CliError({ message, cause });
+const toUpworkRequestError = (message: string) => (cause: unknown) =>
+  new UpworkCliError({ message, cause });
 
-const validateSearchOptions = (options: SearchOptions) => {
+const validateJobQuery = (options: JobQuery) => {
   if (options.query.trim().length === 0) return Option.some("Search query cannot be empty");
   if (options.page < 1) return Option.some("Page must be at least 1");
   if (options.limit < 1 || options.limit > 50) {
@@ -499,15 +500,15 @@ const validateSearchOptions = (options: SearchOptions) => {
   return Option.none<string>();
 };
 
-export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: SearchOptions) {
-  const validationError = validateSearchOptions(options);
+export const findJobsForQuery = Effect.fn("Upwork.findJobsForQuery")(function* (options: JobQuery) {
+  const validationError = validateJobQuery(options);
   if (Option.isSome(validationError)) {
-    return yield* new CliError({ message: validationError.value });
+    return yield* new UpworkCliError({ message: validationError.value });
   }
 
-  const auth = yield* loadAuth();
+  const session = yield* loadAuthenticatedSession();
   const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
-  const fetchPage = Effect.fnUntraced(function* (page: number) {
+  const fetchJobPage = Effect.fnUntraced(function* (page: number) {
     let sort = options.sort;
     if (Option.isSome(options.postedAfter)) sort = "recency";
 
@@ -548,16 +549,22 @@ export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: Sea
       "https://www.upwork.com/api/graphql/v1?alias=userJobSearch",
     ).pipe(
       HttpClientRequest.acceptJson,
-      HttpClientRequest.bearerToken(auth.bearerToken),
-      HttpClientRequest.setHeader("x-upwork-api-tenantid", auth.tenantId),
+      HttpClientRequest.bearerToken(session.bearerToken),
+      HttpClientRequest.setHeader("x-upwork-api-tenantid", session.tenantId),
       HttpClientRequest.setHeader("referer", "https://www.upwork.com/"),
       HttpClientRequest.bodyJsonUnsafe({
         query: USER_JOB_SEARCH_QUERY,
         variables: { requestVariables },
       }),
       client.execute,
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(SearchResponse)),
-      Effect.mapError(requestError("Upwork search failed")),
+      Effect.flatMap(HttpClientResponse.schemaBodyJson(JobQueryResponse)),
+      Effect.withSpan("Upwork.findJobsPage", {
+        attributes: {
+          "upwork.page": page,
+          "upwork.offset": requestVariables.paging.offset,
+        },
+      }),
+      Effect.mapError(toUpworkRequestError("Upwork search failed")),
     );
 
     const search = response.data.search.universalSearchNuxt.userJobSearchV1;
@@ -573,7 +580,7 @@ export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: Sea
       );
       return {
         id: result.id,
-        ciphertext: job.ciphertext,
+        jobReference: job.ciphertext,
         url: `https://www.upwork.com/jobs/${job.ciphertext}`,
         title: result.title,
         description: result.description,
@@ -583,12 +590,11 @@ export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: Sea
         fixedPriceBudget: job.fixedPriceAmount,
         experienceLevel: job.contractorTier,
         publishedAt: job.publishTime,
-        proposals: job.totalApplicants,
+        proposals: Option.fromNullishOr(job.totalApplicants),
         applied: result.applied,
         client: {
           paymentVerified: clientInfo.paymentVerificationStatus === "VERIFIED",
           country: clientInfo.country,
-          rating: clientInfo.totalFeedback,
           reviews: clientInfo.totalReviews,
           totalSpent: clientInfo.totalSpent,
         },
@@ -597,7 +603,7 @@ export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: Sea
     return { paging: search.paging, jobs };
   });
 
-  const first = yield* fetchPage(options.page);
+  const first = yield* fetchJobPage(options.page);
   const postedAfter = options.postedAfter;
   if (Option.isNone(postedAfter)) {
     return {
@@ -623,7 +629,7 @@ export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: Sea
     current.paging.offset + current.paging.count >= current.paging.total;
 
   while (!done && scannedPages < options.maxPages) {
-    current = yield* fetchPage(options.page + scannedPages);
+    current = yield* fetchJobPage(options.page + scannedPages);
     const recent = current.jobs.filter((job) =>
       Option.match(DateTime.make(job.publishedAt), {
         onNone: () => false,
@@ -649,51 +655,51 @@ export const searchJobs = Effect.fn("Upwork.searchJobs")(function* (options: Sea
   };
 });
 
-const normalizeJobId = (input: string) => {
-  const embedded = Option.fromNullishOr(input.match(/~[A-Za-z0-9]+/)?.[0]);
-  if (Option.isSome(embedded)) return embedded;
-  if (/^[A-Za-z0-9]+$/.test(input)) return Option.some(`~${input}`);
-  return Option.none<string>();
-};
+const parseJobReference = (input: string) =>
+  Option.fromNullishOr(input.match(/~[A-Za-z0-9]+/)?.[0]);
 
-export const getJob = Effect.fn("Upwork.getJob")(function* (input: string) {
-  const normalizedId = normalizeJobId(input);
-  if (Option.isNone(normalizedId)) {
-    return yield* new CliError({ message: `Invalid Upwork job ID or URL: ${input}` });
+export const getJobDetails = Effect.fn("Upwork.getJobDetails")(function* (input: string) {
+  const parsedReference = parseJobReference(input);
+  if (Option.isNone(parsedReference)) {
+    return yield* new UpworkCliError({
+      message: `Invalid Upwork job reference or URL: ${input}`,
+    });
   }
-  const id = normalizedId.value;
+  const jobReference = parsedReference.value;
 
-  const auth = yield* loadAuth();
+  const session = yield* loadAuthenticatedSession();
   const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
   const response = yield* HttpClientRequest.post(
     "https://www.upwork.com/api/graphql/v1?alias=gql-query-get-auth-job-details-v2",
   ).pipe(
     HttpClientRequest.acceptJson,
-    HttpClientRequest.bearerToken(auth.bearerToken),
-    HttpClientRequest.setHeader("x-upwork-api-tenantid", auth.tenantId),
+    HttpClientRequest.bearerToken(session.bearerToken),
+    HttpClientRequest.setHeader("x-upwork-api-tenantid", session.tenantId),
     HttpClientRequest.setHeader("referer", "https://www.upwork.com/"),
     HttpClientRequest.bodyJsonUnsafe({
       query: JOB_DETAILS_QUERY,
       variables: {
-        id,
+        id: jobReference,
         isFreelancerOrAgency: true,
         isLoggedIn: true,
       },
     }),
     client.execute,
     Effect.flatMap(HttpClientResponse.schemaBodyJson(JobDetailsResponse)),
-    Effect.mapError(requestError(`Could not load Upwork job ${id}`)),
+    Effect.mapError(toUpworkRequestError(`Could not load Upwork job ${jobReference}`)),
   );
 
   const details = Option.fromNullishOr(response.data.jobAuthDetails);
   if (Option.isNone(details)) {
-    return yield* new CliError({ message: `Upwork job ${id} was not found` });
+    return yield* new UpworkCliError({
+      message: `Upwork job ${jobReference} was not found`,
+    });
   }
 
   return {
     contentTrust: "untrusted",
-    id,
-    url: `https://www.upwork.com/jobs/${id}`,
+    jobReference,
+    url: `https://www.upwork.com/jobs/${jobReference}`,
     details: details.value,
   };
 });

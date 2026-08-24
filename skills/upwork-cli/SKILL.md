@@ -1,6 +1,6 @@
 ---
 name: upwork-cli
-description: Use the installed Upwork CLI to authenticate, find and filter jobs across one or more queries, inspect a job ID or URL, and prepare a shortlist for the user.
+description: Use the installed Upwork CLI to authenticate, find and filter jobs across one or more queries, inspect a job reference or URL, and prepare a shortlist for the user.
 ---
 
 # Upwork CLI
@@ -80,7 +80,7 @@ Defaults and controls:
 - Payment-verified clients are required by default. Use `--include-unverified` to opt out.
 - `--max-proposals` applies an exact cap after results are fetched.
 - `--max-results` limits the compact summaries returned after deduplication.
-- Multiple queries run independently and are deduplicated by Upwork job ID.
+- Multiple queries run independently and are deduplicated by Upwork search result ID.
 - `--sort recency` orders the combined result by publication time.
 - `--sort relevance` preserves each query's Upwork ranking while combining the results.
 - `--posted-within` requires `--sort recency`.
@@ -92,7 +92,7 @@ Run `upwork find --help` for proposal ranges, budgets, duration, workload, clien
 The response contains:
 
 - `meta.cliVersion`: the installed CLI version.
-- `jobs`: compact summaries without job descriptions. Each job includes `matchedQueries`.
+- `jobs`: compact summaries without job descriptions. Each job includes `searchResultId`, `jobReference`, and `matchedQueries`.
 - `queries`: one status per query. Successful entries include paging data; failed entries include the error.
 - `filters`: the applied settings.
 - `scannedPages`: the total pages scanned across successful queries.
@@ -101,7 +101,7 @@ Run one multi-query `find`, inspect `queries[].status`, then call `upwork job` o
 
 ## Inspect shortlisted jobs
 
-Pass a ciphertext, bare ID, or full Upwork URL:
+Pass a job reference beginning with `~` or a full Upwork URL:
 
 ```bash
 upwork job '~0123456789'

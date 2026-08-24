@@ -27,6 +27,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cache
 *.tsbuildinfo
 
+# local observability data
+.motel-data/
+
 # IntelliJ based IDEs
 .idea
 

@@ -1,7 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import { ConfigProvider, Context, Effect, FileSystem, Layer, Option, Ref } from "effect";
 import { Headers, HttpClient, HttpServerResponse } from "effect/unstable/http";
-import { loadAuth } from "../src/auth.ts";
+import { loadAuthenticatedSession } from "../src/auth.ts";
 
 class AuthTestHarness extends Context.Service<
   AuthTestHarness,
@@ -65,7 +65,7 @@ it.layer(authLayer)("authentication state", (it) => {
   it.effect("discovers and validates an opaque bearer cookie", () =>
     Effect.gen(function* () {
       const harness = yield* AuthTestHarness;
-      const auth = yield* loadAuth();
+      const auth = yield* loadAuthenticatedSession();
       const authorizationHeaders = yield* harness.authorizationHeaders;
 
       expect({
