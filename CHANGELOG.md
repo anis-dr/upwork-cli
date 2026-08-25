@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.5.2
+
+### Patch Changes
+
+- 092f103: Refactor job discovery into focused Shortlist and Job query modules without changing CLI behavior.
+
 ## 0.5.1
 
 ### Patch Changes
