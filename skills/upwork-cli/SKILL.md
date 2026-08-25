@@ -30,6 +30,7 @@ upwork find \
   --posted-within 3d \
   --max-proposals 20 \
   --max-connects 15 \
+  --require-qualified \
   --page-size 20 \
   "Effect TypeScript" \
   "AI agent TypeScript"
@@ -68,6 +69,7 @@ upwork find \
   --sort relevance \
   --max-proposals 15 \
   --max-connects 15 \
+  --require-qualified \
   --max-results 20 \
   --experience expert \
   --job-type hourly \
@@ -82,6 +84,7 @@ Defaults and controls:
 - Payment-verified clients are required by default. Use `--include-unverified` to opt out.
 - `--max-proposals` applies an exact cap after results are fetched.
 - `--max-connects` applies an exact cap using each job's current application cost.
+- `--require-qualified` excludes jobs when any account-specific preferred qualification reports `qualified: false`.
 - `--max-results` limits the compact summaries returned after deduplication.
 - Multiple queries run independently and are deduplicated by Upwork search result ID.
 - `--sort recency` orders the combined result by publication time.
@@ -97,6 +100,7 @@ The response contains:
 - `meta.cliVersion`: the installed CLI version.
 - `jobs`: compact summaries without job descriptions. Each job includes `searchResultId`, `jobReference`, `requiredConnects`, and `matchedQueries`.
 - `queries`: one status per query. Successful entries include paging data; failed entries include the error.
+- `qualificationErrors`: jobs excluded because their qualification data could not be checked.
 - `filters`: the applied settings.
 - `scannedPages`: the total pages scanned across successful queries.
 

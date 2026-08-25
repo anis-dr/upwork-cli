@@ -1,10 +1,31 @@
-import { Array as EffectArray, Effect, Option, Schema } from "effect";
+import { Array as EffectArray, Effect, Option, Result, Schema } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import { type AuthenticatedSession, UpworkCliError, loadAuthenticatedSession } from "./auth.ts";
+import type { QualificationCheck } from "./shortlist.ts";
 
 const JobDetailsResponse = Schema.Struct({
   data: Schema.Struct({
     jobAuthDetails: Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown)),
+  }),
+});
+
+const QualificationMatch = Schema.Struct({
+  qualified: Schema.Boolean,
+});
+
+const JobQualificationMatchesResponse = Schema.Struct({
+  data: Schema.Struct({
+    jobAuthDetails: Schema.NullOr(
+      Schema.Struct({
+        currentUserInfo: Schema.Struct({
+          freelancerInfo: Schema.Struct({
+            qualificationsMatches: Schema.Struct({
+              matches: Schema.Array(QualificationMatch),
+            }),
+          }),
+        }),
+      }),
+    ),
   }),
 });
 
@@ -28,6 +49,21 @@ const JobDetailsOpening = Schema.Struct({
     }),
   }),
 });
+
+const JOB_QUALIFICATION_MATCHES_QUERY = `
+query JobQualificationMatches($id: ID!) {
+  jobAuthDetails(id: $id) {
+    currentUserInfo {
+      freelancerInfo {
+        qualificationsMatches {
+          matches {
+            qualified
+          }
+        }
+      }
+    }
+  }
+}`;
 
 const JOB_DETAILS_QUERY = `
 query JobAuthDetailsQuery(
@@ -428,6 +464,62 @@ export const getRequiredConnects = Effect.fn("Upwork.getRequiredConnects")(funct
 
 const parseJobReference = (input: string) =>
   Option.fromNullishOr(input.match(/~[A-Za-z0-9]+/)?.[0]);
+
+const fetchQualificationMatches = Effect.fnUntraced(function* (
+  session: AuthenticatedSession,
+  jobReference: string,
+) {
+  const client = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const response = yield* HttpClientRequest.post(
+    "https://www.upwork.com/api/graphql/v1?alias=gql-query-get-auth-job-details-v2",
+  ).pipe(
+    HttpClientRequest.acceptJson,
+    HttpClientRequest.bearerToken(session.bearerToken),
+    HttpClientRequest.setHeader("x-upwork-api-tenantid", session.tenantId),
+    HttpClientRequest.setHeader("referer", "https://www.upwork.com/"),
+    HttpClientRequest.bodyJsonUnsafe({
+      query: JOB_QUALIFICATION_MATCHES_QUERY,
+      variables: { id: jobReference },
+    }),
+    client.execute,
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(JobQualificationMatchesResponse)),
+    Effect.mapError(
+      toUpworkRequestError(`Could not load Upwork qualifications for ${jobReference}`),
+    ),
+  );
+  const details = Option.fromNullishOr(response.data.jobAuthDetails);
+  if (Option.isNone(details)) {
+    return yield* new UpworkCliError({
+      message: `Could not load Upwork qualifications for ${jobReference}`,
+    });
+  }
+  return details.value.currentUserInfo.freelancerInfo.qualificationsMatches.matches;
+});
+
+export const checkQualifications = Effect.fn("Upwork.checkQualifications")(function* (
+  jobReferences: ReadonlyArray<string>,
+) {
+  const session = yield* loadAuthenticatedSession();
+  return yield* Effect.forEach(
+    jobReferences,
+    Effect.fnUntraced(function* (jobReference) {
+      const result = yield* fetchQualificationMatches(session, jobReference).pipe(Effect.result);
+      if (Result.isFailure(result)) {
+        return {
+          jobReference,
+          status: "error",
+          error: result.failure.message,
+        } satisfies QualificationCheck;
+      }
+      return {
+        jobReference,
+        status: "ok",
+        matches: result.success,
+      } satisfies QualificationCheck;
+    }),
+    { concurrency: 3 },
+  );
+});
 
 export const getJobDetails = Effect.fn("Upwork.getJobDetails")(function* (input: string) {
   const parsedReference = parseJobReference(input);

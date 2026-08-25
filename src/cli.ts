@@ -8,7 +8,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { captureAuthenticatedSession, UpworkCliError, authenticate } from "./auth.ts";
 import { findJobsForQuery } from "./job-query.ts";
 import { findShortlist } from "./shortlist.ts";
-import { getJobDetails, getRequiredConnects } from "./upwork.ts";
+import { checkQualifications, getJobDetails, getRequiredConnects } from "./upwork.ts";
 
 const encodeJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown, { space: 2 }));
 
@@ -156,6 +156,10 @@ const includeUnverifiedFlag = Flag.boolean("include-unverified").pipe(
   Flag.withDefault(false),
   Flag.withDescription("Include clients without verified payment"),
 );
+const requireQualifiedFlag = Flag.boolean("require-qualified").pipe(
+  Flag.withDefault(false),
+  Flag.withDescription("Only jobs matching every preferred qualification"),
+);
 
 const findCommand = Command.make(
   "find",
@@ -167,6 +171,7 @@ const findCommand = Command.make(
     maxResults: maxResultsFlag,
     sort: sortFlag,
     includeUnverified: includeUnverifiedFlag,
+    requireQualified: requireQualifiedFlag,
     proposals: proposalsFlag,
     experience: experienceFlag,
     jobType: jobTypeFlag,
@@ -184,7 +189,7 @@ const findCommand = Command.make(
         ...config,
         cliVersion: packageJson.version,
       },
-      { findJobsForQuery, getRequiredConnects },
+      { findJobsForQuery, getRequiredConnects, checkQualifications },
     ).pipe(Effect.flatMap(printJson)),
 ).pipe(Command.withDescription("Combine, deduplicate, and filter job searches"));
 

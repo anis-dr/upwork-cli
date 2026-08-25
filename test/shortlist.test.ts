@@ -4,6 +4,7 @@ import { UpworkCliError } from "../src/auth.ts";
 import type { JobQuery, JobQueryJob, JobQueryResult } from "../src/job-query.ts";
 import {
   findShortlist,
+  type QualificationCheck,
   type ShortlistConfig,
   type ShortlistDependencies,
 } from "../src/shortlist.ts";
@@ -42,6 +43,7 @@ const makeConfig = (overrides: Partial<ShortlistConfig> = {}): ShortlistConfig =
   queries: ["alpha", "beta"],
   maxProposals: 20,
   maxConnects: Option.none(),
+  requireQualified: false,
   pageSize: 20,
   maxResults: 20,
   sort: "recency",
@@ -63,6 +65,7 @@ const makeDependencies = (
   responses: Readonly<Record<string, JobQueryResult>>,
   connects: Readonly<Record<string, number>>,
   failures: Readonly<Record<string, string>> = {},
+  qualificationChecks: ReadonlyArray<QualificationCheck> = [],
 ): ShortlistDependencies => ({
   findJobsForQuery: (query: JobQuery) => {
     const failure = Option.fromNullishOr(failures[query.query]);
@@ -76,6 +79,7 @@ const makeDependencies = (
     return Effect.succeed(response.value);
   },
   getRequiredConnects: () => Effect.succeed({ ...connects }),
+  checkQualifications: () => Effect.succeed(qualificationChecks),
 });
 
 it.effect("deduplicates, orders, filters, and reports partial query failures", () =>
@@ -150,6 +154,64 @@ it.effect("round-robins relevance results before applying the result cap", () =>
     );
 
     expect(result.jobs.map((job) => job.searchResultId)).toEqual(["alpha-1", "beta-1"]);
+  }),
+);
+
+it.effect("requires every preferred qualification and reports failed checks", () =>
+  Effect.gen(function* () {
+    const dependencies = makeDependencies(
+      {
+        alpha: makeResponse([
+          makeJob("unqualified", "2026-08-24T00:00:00.000Z", 1),
+          makeJob("check-error", "2026-08-23T00:00:00.000Z", 1),
+          makeJob("qualified", "2026-08-22T00:00:00.000Z", 1),
+          makeJob("no-preferences", "2026-08-21T00:00:00.000Z", 1),
+        ]),
+      },
+      { qualified: 4, "no-preferences": 5 },
+      {},
+      [
+        {
+          jobReference: "~unqualified",
+          status: "ok",
+          matches: [{ qualified: true }, { qualified: false }],
+        },
+        {
+          jobReference: "~check-error",
+          status: "error",
+          error: "Could not load qualification matches",
+        },
+        {
+          jobReference: "~qualified",
+          status: "ok",
+          matches: [{ qualified: true }],
+        },
+        {
+          jobReference: "~no-preferences",
+          status: "ok",
+          matches: [],
+        },
+      ],
+    );
+
+    const result = yield* findShortlist(
+      makeConfig({
+        queries: ["alpha"],
+        maxResults: 2,
+        requireQualified: true,
+      }),
+      dependencies,
+    );
+
+    expect(result.jobs.map((job) => job.searchResultId)).toEqual(["qualified", "no-preferences"]);
+    expect(result.jobs.map((job) => job.requiredConnects)).toEqual([4, 5]);
+    expect(result.qualificationErrors).toEqual([
+      {
+        jobReference: "~check-error",
+        error: "Could not load qualification matches",
+      },
+    ]);
+    expect(result.filters.requireQualified).toBe(true);
   }),
 );
 
