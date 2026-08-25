@@ -53,6 +53,7 @@ upwork find \
   --posted-within 3d \
   --max-proposals 20 \
   --max-connects 15 \
+  --require-qualified \
   --max-results 20 \
   --experience expert \
   --client-hires 10-plus \
@@ -62,6 +63,8 @@ upwork find \
 ```
 
 `find` runs each query independently, deduplicates jobs by ID, applies the exact client-side proposal and Connects caps, and returns at most `--max-results` compact summaries. It limits results to payment-verified clients unless `--include-unverified` is present.
+
+`--require-qualified` loads account-specific qualification matches and excludes a job when any match reports `qualified: false`. Qualification checks run before the final result cap. Jobs whose qualification data cannot be checked are excluded and reported under `qualificationErrors`; an empty match list passes.
 
 One failed query does not discard successful queries. Each `queries` entry reports `status: "ok"` with paging metadata or `status: "error"` with the query error.
 
@@ -97,6 +100,7 @@ Run `upwork find --help` for the accepted values.
 | `--proposals`          | Select an Upwork proposal-count range                        |
 | `--max-proposals`      | Apply an exact client-side proposal cap                      |
 | `--max-connects`       | Apply an exact client-side required Connects cap             |
+| `--require-qualified`  | Require every account-specific preferred qualification       |
 | `--max-results`        | Limit compact jobs returned after deduplication              |
 | `--experience`         | Select entry, intermediate, or expert work                   |
 | `--job-type`           | Select hourly or fixed-price work                            |

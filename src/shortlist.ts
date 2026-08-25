@@ -27,6 +27,7 @@ export interface ShortlistConfig {
   readonly queries: ReadonlyArray<string>;
   readonly maxProposals: number;
   readonly maxConnects: Option.Option<number>;
+  readonly requireQualified: boolean;
   readonly pageSize: number;
   readonly maxResults: number;
   readonly sort: JobSort;
@@ -43,6 +44,22 @@ export interface ShortlistConfig {
   readonly maxPages: number;
 }
 
+interface QualificationMatch {
+  readonly qualified: boolean;
+}
+
+export type QualificationCheck =
+  | {
+      readonly jobReference: string;
+      readonly status: "ok";
+      readonly matches: ReadonlyArray<QualificationMatch>;
+    }
+  | {
+      readonly jobReference: string;
+      readonly status: "error";
+      readonly error: string;
+    };
+
 export interface ShortlistDependencies<
   Error extends { readonly message: string } = UpworkCliError,
   Requirements = never,
@@ -53,6 +70,9 @@ export interface ShortlistDependencies<
   readonly getRequiredConnects: (
     jobIds: ReadonlyArray<string>,
   ) => Effect.Effect<Readonly<Record<string, number>>, Error, Requirements>;
+  readonly checkQualifications: (
+    jobReferences: ReadonlyArray<string>,
+  ) => Effect.Effect<ReadonlyArray<QualificationCheck>, Error, Requirements>;
 }
 
 interface FindFilters {
@@ -273,24 +293,48 @@ export const findShortlist = Effect.fn("Shortlist.find")(function* <
     config.sort,
     config.maxProposals,
   );
-  const connectsCandidates = Option.match(config.maxConnects, {
-    onNone: () => mergedJobs.slice(0, config.maxResults),
-    onSome: () => mergedJobs,
-  });
-  const requiredConnects = yield* dependencies.getRequiredConnects(
-    connectsCandidates.map((job) => job.id),
+  const requiredConnectsForFilter: Readonly<Record<string, number>> = yield* Option.match(
+    config.maxConnects,
+    {
+      onNone: () => Effect.succeed({} satisfies Record<string, number>),
+      onSome: () => dependencies.getRequiredConnects(mergedJobs.map((job) => job.id)),
+    },
   );
-  const selectedJobs = connectsCandidates
-    .filter((job) =>
-      Option.match(config.maxConnects, {
-        onNone: () => true,
-        onSome: (maximum) =>
-          Option.fromNullishOr(requiredConnects[job.id]).pipe(
-            Option.exists((required) => required <= maximum),
-          ),
-      }),
-    )
-    .slice(0, config.maxResults);
+  const connectsCandidates = mergedJobs.filter((job) =>
+    Option.match(config.maxConnects, {
+      onNone: () => true,
+      onSome: (maximum) =>
+        Option.fromNullishOr(requiredConnectsForFilter[job.id]).pipe(
+          Option.exists((required) => required <= maximum),
+        ),
+    }),
+  );
+  let qualifiedCandidates = connectsCandidates;
+  const qualificationErrors: Array<{ readonly jobReference: string; readonly error: string }> = [];
+  if (config.requireQualified) {
+    const qualificationChecks = yield* dependencies.checkQualifications(
+      connectsCandidates.map((job) => job.jobReference),
+    );
+    const qualifiedJobReferences = new Set<string>();
+    for (const check of qualificationChecks) {
+      if (check.status === "error") {
+        qualificationErrors.push({
+          jobReference: check.jobReference,
+          error: check.error,
+        });
+      } else if (check.matches.every(({ qualified }) => qualified)) {
+        qualifiedJobReferences.add(check.jobReference);
+      }
+    }
+    qualifiedCandidates = connectsCandidates.filter((job) =>
+      qualifiedJobReferences.has(job.jobReference),
+    );
+  }
+  const selectedJobs = qualifiedCandidates.slice(0, config.maxResults);
+  const requiredConnects = yield* Option.match(config.maxConnects, {
+    onNone: () => dependencies.getRequiredConnects(selectedJobs.map((job) => job.id)),
+    onSome: () => Effect.succeed(requiredConnectsForFilter),
+  });
   const jobSummaries = selectedJobs.map((job) => ({
     searchResultId: job.id,
     jobReference: job.jobReference,
@@ -336,6 +380,7 @@ export const findShortlist = Effect.fn("Shortlist.find")(function* <
       paymentVerified: !config.includeUnverified,
       maxProposals: config.maxProposals,
       maxConnects: Option.getOrNull(config.maxConnects),
+      requireQualified: config.requireQualified,
       maxResults: config.maxResults,
       sort: config.sort,
       pageSize: config.pageSize,
@@ -349,6 +394,7 @@ export const findShortlist = Effect.fn("Shortlist.find")(function* <
       contractToHire: config.contractToHire,
       postedWithin: config.postedWithin,
     },
+    qualificationErrors,
     scannedPages: successfulQueries.reduce(
       (total, { response }) => total + response.scannedPages,
       0,

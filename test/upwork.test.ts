@@ -1,7 +1,7 @@
 import { expect, it } from "@effect/vitest";
 import { Array, ConfigProvider, Context, Effect, FileSystem, Layer, Ref, Schema } from "effect";
 import { HttpClient, HttpServerResponse } from "effect/unstable/http";
-import { getRequiredConnects } from "../src/upwork.ts";
+import { checkQualifications, getRequiredConnects } from "../src/upwork.ts";
 
 const BodyJson = Schema.TaggedStruct("Uint8Array", {
   body: Schema.String,
@@ -9,11 +9,38 @@ const BodyJson = Schema.TaggedStruct("Uint8Array", {
 const decodeBodyJson = Schema.decodeUnknownEffect(BodyJson);
 const authState = `{"cookies":[{"name":"oauth2_global_js_token","value":"valid-opaque-token","domain":".upwork.com","path":"/"},{"name":"current_organization_uid","value":"tenant","domain":".upwork.com","path":"/"}]}`;
 
-const ConnectsRequest = Schema.Struct({
+const GraphQlRequest = Schema.Struct({
   query: Schema.String,
   variables: Schema.Record(Schema.String, Schema.String),
 });
-const decodeConnectsRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(ConnectsRequest));
+const decodeGraphQlRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(GraphQlRequest));
+const QualificationRequest = Schema.Struct({
+  query: Schema.String,
+  variables: Schema.Struct({
+    id: Schema.String,
+  }),
+});
+const decodeQualificationRequest = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(QualificationRequest),
+);
+
+const qualificationDetails = (matches: ReadonlyArray<{ readonly qualified: boolean }>) => ({
+  currentUserInfo: {
+    freelancerInfo: {
+      qualificationsMatches: { matches },
+    },
+  },
+});
+
+const qualificationDetailsFor = (jobReference: string) => {
+  if (jobReference === "~qualified") {
+    return qualificationDetails([{ qualified: true }, { qualified: true }]);
+  }
+  if (jobReference === "~unqualified") {
+    return qualificationDetails([{ qualified: true }, { qualified: false }]);
+  }
+  return {};
+};
 
 class ConnectsTestHarness extends Context.Service<
   ConnectsTestHarness,
@@ -48,7 +75,17 @@ const connectsLayer = Layer.unwrap(
           }).pipe(Effect.orDie);
           return HttpServerResponse.toClientResponse(response, { request });
         }
-        const body = yield* decodeConnectsRequest(bodyJson.body).pipe(Effect.orDie);
+        const body = yield* decodeGraphQlRequest(bodyJson.body).pipe(Effect.orDie);
+        if (body.query.includes("JobQualificationMatches")) {
+          const qualificationRequest = yield* decodeQualificationRequest(bodyJson.body).pipe(
+            Effect.orDie,
+          );
+          const jobAuthDetails = qualificationDetailsFor(qualificationRequest.variables.id);
+          const response = yield* HttpServerResponse.json({
+            data: { jobAuthDetails },
+          }).pipe(Effect.orDie);
+          return HttpServerResponse.toClientResponse(response, { request });
+        }
         yield* Ref.update(batchSizes, (sizes) => [...sizes, Object.keys(body.variables).length]);
         const data = Object.fromEntries(
           Object.entries(body.variables).map(([key, id]) => [key, { price: Number(id) }]),
@@ -85,6 +122,32 @@ it.layer(connectsLayer)("required Connects", (it) => {
       expect(result["1"]).toBe(1);
       expect(result["10"]).toBe(10);
       expect(yield* harness.batchSizes).toEqual([9, 1]);
+    }),
+  );
+});
+
+it.layer(connectsLayer)("preferred qualifications", (it) => {
+  it.effect("checks each job independently and reports malformed responses", () =>
+    Effect.gen(function* () {
+      const result = yield* checkQualifications(["~qualified", "~unqualified", "~malformed"]);
+
+      expect(result).toEqual([
+        {
+          jobReference: "~qualified",
+          status: "ok",
+          matches: [{ qualified: true }, { qualified: true }],
+        },
+        {
+          jobReference: "~unqualified",
+          status: "ok",
+          matches: [{ qualified: true }, { qualified: false }],
+        },
+        {
+          jobReference: "~malformed",
+          status: "error",
+          error: "Could not load Upwork qualifications for ~malformed",
+        },
+      ]);
     }),
   );
 });
