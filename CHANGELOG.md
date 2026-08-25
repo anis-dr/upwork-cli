@@ -1,5 +1,11 @@
 # upwork-cli
 
+## 0.6.0
+
+### Minor Changes
+
+- fc690b8: Add `--require-qualified` filtering for account-specific preferred qualifications.
+
 ## 0.5.2
 
 ### Patch Changes
